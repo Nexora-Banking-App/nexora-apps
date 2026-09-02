@@ -1,6 +1,6 @@
 # Nexora Core Banking Platform: Workload Architecture & Engineering Reference
 
-An institutional-grade, distributed core banking application workload designed for the **Nexora Enterprise GitOps Platform**. This project demonstrates a Zero-Trust microservices architecture with edge token verification, a Two-Phase Lease idempotency engine with monotonic **Fencing Tokens**, double-entry bookkeeping, and ACID-compliant distributed locking.
+An institutional-grade, distributed core banking application workload designed for the **Nexora Enterprise GitOps Platform**. This project demonstrates a Zero-Trust microservices architecture with edge token verification, a Two-Phase Lease idempotency engine with monotonic **Fencing Tokens**, double-entry bookkeeping, automated concurrency test suites, and ACID-compliant distributed locking.
 
 ---
 
@@ -17,7 +17,7 @@ An institutional-grade, distributed core banking application workload designed f
 9. [Secrets & Configuration Management](#secrets--configuration-management)
 10. [Container Optimization & Multi-Stage Builds](#container-optimization--multi-stage-builds)
 11. [Metrics & Observability Instrumentation](#metrics--observability-instrumentation)
-12. [System Verification & End-to-End Testing](#system-verification--end-to-end-testing)
+12. [Automated Concurrency Testing & System Verification](#automated-concurrency-testing--system-verification)
 13. [Real-World Troubleshooting & Solutions](#real-world-troubleshooting--solutions)
 14. [Screenshots Index](#screenshots-index)
 
@@ -31,7 +31,7 @@ The Nexora banking workload is structured as a polyglot, domain-driven microserv
 |---|---|---|---|
 | `frontend-web` | NGINX 1.25 / Alpine / Vanilla JS / Tailwind | Client Single-Page App (SPA), Tab-isolated Session Manager | 8080 (Mapped: 80) |
 | `api-gateway` | Python 3.11 / FastAPI / Asynchronous `httpx` | Edge Rate-Limiting, Distributed Tracing (`X-Correlation-ID`), JWT Verification | 8000 |
-| `auth-service` | Python 3.11 / FastAPI / `bcrypt` / `PyJWT` | Identity Management, Password Hashing, Treasury Grant Initiation | 8000 (Internal) |
+| `auth-service` | Python 3.11 / FastAPI / `bcrypt` / `PyJWT` | Identity Management, Password Hashing, Deterministic Grant Delegation | 8000 (Internal) |
 | `account-service` | Python 3.11 / FastAPI / `DBUtils` / `PyMySQL` | Strictly Read-Only CQRS Ledger, Paginated Account Queries | 8000 (Internal) |
 | `transaction-service` | Python 3.11 / FastAPI / `Decimal` / `httpx` | Sole Mutation Authority, Deterministic Locks, Fencing-Token Lease Engine | 8000 (Internal) |
 | `fraud-service` | Python 3.11 / FastAPI / `prometheus-fastapi` | CPU-Intensive Risk Engine, HPA & Prometheus Golden Signals Target | 8000 (Internal) |
@@ -61,10 +61,15 @@ http://localhost:8080
 
 **3. Test Peer-to-Peer Transfers**
 * Open **Tab 1**: Register as `ahmed` (password: `password123`). Log in -> Balance will display **$1,000.00** from the Treasury Reserve.
-* Open **Tab 2**: Register as `sarah` (password: `password123`). Log in -> Balance will display **$1,000.00**.
-* In **Tab 1**, transfer `$250.00` to `sarah`.
-* In **Tab 2**, observe Sarah's balance update to **$1,250.00** and Ahmed's balance update to **$750.00**.
+* Open **Tab 2**: Register as `omar` (password: `password123`). Log in -> Balance will display **$1,000.00**.
+* In **Tab 1**, transfer `$250.00` to `omar`.
+* In **Tab 2**, observe omar's balance update to **$1,250.00** and Ahmed's balance update to **$750.00**.
 
+```text
+
+Note: Giving each user $1000 on signup is designed for testing purporses and not a real scenario.
+
+```
 ---
 
 ## Architecture
@@ -81,6 +86,7 @@ http://localhost:8080
          • SPA Dashboard (Tailwind CSS)                  • Perimeter Rate Limiting (Sliding Window)
          • Client-Side UUID Idempotency-Keys             • Distributed Tracing (X-Correlation-ID)
          • Tab-Isolated Session Storage                  • Edge JWT Verification & Claim Stripping
+                                                         • Spec-Valid CORS (Explicit Origins)
                                                          • Transparent CORS OPTIONS Bypass
                                                          • Trusted Downstream Header Injection (X-User-Id)
                                                                      │
@@ -90,7 +96,7 @@ http://localhost:8080
              [ auth-service ]                              [ account-service ]                           [ transaction-service ]
              • Salting & Bcrypt Hashing                    • Strictly Read-Only CQRS Ledger              • 1. Phase 1: Fast Lease (<1ms)
              • 15-min JWT Minting (HS256)                  • Paginated Queries (Limit/Offset)            • 2. Phase 2: Unconnected Fraud RPC
-             • Treasury Grant RPC Delegation               • Zero Side Effects on GET /account/me        • 3. Phase 3: Fast Mutation (<5ms)
+             • Deterministic Grant RPC Delegation          • Zero Side Effects on GET /account/me        • 3. Phase 3: Fast Mutation (<5ms)
              • Lazy Connection Pooling                     • Lazy Connection Pooling                     • 4. Monotonic Fencing Tokens
              • Lifespan Graceful Draining                  • Lifespan Graceful Draining                  • 5. Sole Ledger Mutation Authority
                        │                                             │                                             │
@@ -109,8 +115,8 @@ http://localhost:8080
 ## Prerequisites
 
 * Docker Engine (>= 24.0) & Docker Compose V2
-* Python 3.11+ (for local script execution/testing)
-* `curl` or Postman (for raw API and idempotency stress testing)
+* Python 3.11+ (for local test runner execution)
+* `pytest`, `pytest-asyncio`, and `httpx` (for running the automated concurrency test suite)
 * Modern Web Browser (Chrome, Firefox, Brave, Edge)
 
 ---
@@ -122,6 +128,7 @@ Local development runs the entire 7-tier microservice architecture connected ove
 ```bash
 docker compose up --build
 ```
+![alt text](screenshots/docker-compose-up.png)
 
 ### Endpoints
 * **Frontend Portal:** `http://localhost:8080`
@@ -141,12 +148,12 @@ docker compose up --build
 * **Perimeter Rate Limiting:** Enforces in-memory sliding-window throttles (`/login`: max 5 req/min per IP; `/signup`: max 3 req/hr per IP).
 * **Distributed Tracing:** Inspects incoming traffic for `X-Correlation-ID`. If missing, mints a UUID and propagates it across downstream HTTP headers and client responses.
 * **Edge Authentication:** Verifies JWT signatures (`HS256`, 15-minute expiration), drops untrusted client headers, and injects verified `X-User-Id` and `X-Username` headers downstream.
-* **CORS Preflight:** Bypasses authentication for HTTP `OPTIONS` requests to allow standard browser preflight handshakes.
+* **CORS Specification:** Strictly enforces explicit allowed origins (`CORS_ORIGINS`) with `allow_credentials=True` and provides an unauthenticated bypass for HTTP `OPTIONS` preflight checks.
 
 ### 3. `auth-service`
 * **Password Hashing:** 12-round salted hashing using the official C-optimized `bcrypt` library.
 * **Atomic Identity Provisioning:** Creates user credentials and opens an account with `$0.00` in a single SQL transaction.
-* **Double-Entry Grant Delegation:** Discovers `nexora_treasury` (User ID 1) and issues an internal RPC call to `transaction-service` to award the initial $1,000.00 onboarding grant. Contains zero raw balance mutation SQL.
+* **Deterministic Grant Delegation:** Delegates the $1,000.00 welcome grant to `transaction-service` using a deterministic key (`grant-user-{id}`). In case of network timeouts, local state is preserved without destructive rollbacks, making the grant safely retryable.
 
 ### 4. `account-service`
 * **Strictly Read-Only (Zero Side Effects):** Operates purely as a CQRS read model. Never creates money or alters balances on `GET /account/me`. Raises `404 Not Found` if an account is unprovisioned.
@@ -160,6 +167,11 @@ docker compose up --build
 ### 6. `fraud-service`
 * **Risk Engine Simulation:** Heavy mathematical loops simulating CPU-intensive algorithmic scoring.
 * **Observability:** Exposes latency, saturation, error rate, and request volume via `prometheus-fastapi-instrumentator` on `/metrics`.
+
+![alt text](screenshots/signup-screen.png)
+![alt text](screenshots/dashboard-ahmed.png)
+![alt text](screenshots/dashboard-omar.png)
+
 
 ---
 
@@ -224,6 +236,7 @@ Configuration and secrets are strictly decoupled from application code following
   * `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`: Database target connectivity.
   * `JWT_SECRET`: Secret key for HS256 token minting and perimeter validation.
   * `INTERNAL_SERVICE_SECRET`: Constant-time verified key (`secrets.compare_digest`) for internal RPC calls.
+  * `CORS_ORIGINS`: Comma-separated allowed origins (e.g. `http://localhost:8080`).
   * `FRAUD_SVC_URL`, `ACCOUNT_SVC_URL`, `TRANSACTION_SVC_URL`, `AUTH_SVC_URL`: Service discovery endpoints.
 * **Kubernetes Integration (Upcoming Phase 3):**
   * `app-secrets` will be dynamically synced from **AWS Secrets Manager** via the **External Secrets Operator (ESO)** and injected at pod runtime.
@@ -269,60 +282,36 @@ Every microservice instruments FastAPI via `prometheus-fastapi-instrumentator` e
 ### 2. Distributed Tracing
 The API Gateway generates or propagates an `X-Correlation-ID` header across all downstream RPCs, tying client requests, microservice logs, and database errors into a single unified trace.
 
+![alt text](screenshots/prometheus-metrics.png)
 ---
 
-## System Verification & End-to-End Testing
+## Automated Concurrency Testing & System Verification
 
-### 1. Verification via Web Portal
-1. Navigate to `http://localhost:8080`.
-2. Register User 1: `ahmed` (`password123`).
-3. Verify Dashboard reflects **Welcome, ahmed!**, **$1,000.00** Balance, and an incoming grant from `nexora_treasury`.
-4. In a separate tab, register User 2: `sarah` (`password123`).
-5. Execute transfer: Send `$250.00` from `ahmed` to `sarah`.
-6. Confirm real-time balance mutation ($750.00 / $1,250.00) and ledger generation.
+The repository includes an automated integration test suite in `tests/test_concurrency.py` that executes parallel asynchronous requests against the running cluster to empirically validate concurrency guarantees.
 
-### 2. Verification via Command Line (API Testing)
-
-**Step 1: Sign up a user**
+### 1. Running the Automated Concurrency Tests
 ```bash
-curl -i -X POST "http://localhost:8000/api/signup" \
-  -H "Content-Type: application/json" \
-  -d '{"username":"john_doe","email":"john@nexora.bank","phone":"555-0199","password":"SecretPassword123"}'
+pip install pytest pytest-asyncio httpx
+pytest tests/test_concurrency.py -v
 ```
 
-**Step 2: Authenticate and obtain JWT**
-```bash
-TOKEN=$(curl -s -X POST "http://localhost:8000/api/login" \
-  -H "Content-Type: application/json" \
-  -d '{"username":"john_doe","password":"SecretPassword123"}' | jq -r '.access_token')
-echo "Token: $TOKEN"
+### 2. Test Suite Specifications
+
+```text
+tests/test_concurrency.py::test_concurrent_transfers_no_double_spend PASSED   [ 33%]
+tests/test_concurrency.py::test_concurrent_idempotency_replays PASSED         [ 66%]
+tests/test_concurrency.py::test_bidirectional_transfers_no_deadlock PASSED   [100%]
+
+============================== 3 passed in 1.42s ==============================
 ```
 
-**Step 3: Query Account Balance & Paginated Ledger**
-```bash
-curl -s -X GET "http://localhost:8000/api/account/me?limit=5&offset=0" \
-  -H "Authorization: Bearer $TOKEN" | jq .
-```
+* **Test 1 (`test_concurrent_transfers_no_double_spend`):** Fires 10 simultaneous $200 transfers from an account with $1,000. Asserts that row-level locking strictly serializes execution to produce exactly 5 successes ($1,000 debited) and 5 rejections for insufficient funds, with ending balance $0.00.
+* **Test 2 (`test_concurrent_idempotency_replays`):** Fires 10 simultaneous transfers sharing the exact same `Idempotency-Key` UUID. Asserts that the atomic lease ensures money is debited exactly once ($200) and all requests return 200 or 409.
+* **Test 3 (`test_bidirectional_transfers_no_deadlock`):** Fires simultaneous cross-transfers (User A -> User B and User B -> User A). Asserts that deterministic ascending lock ordering (`min/max`) eliminates SQL deadlocks.
 
-**Step 4: Execute an Idempotent Transfer**
-```bash
-KEY=$(uuidgen)
-curl -s -X POST "http://localhost:8000/api/transfer" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Idempotency-Key: $KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"receiver_username":"ahmed","amount":150.00}' | jq .
-```
+![](screenshots/test.png)
 
-**Step 5: Test Idempotency Replay (Re-send identical request)**
-```bash
-curl -s -X POST "http://localhost:8000/api/transfer" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Idempotency-Key: $KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"receiver_username":"ahmed","amount":150.00}' | jq .
-```
-*(Notice the immediate return of the cached JSON without double-debiting the account).*
+*(Note: The fencing token commit gate is verified by database constraint enforcement and code analysis, as black-box HTTP tests cannot easily simulate an asynchronous OS thread pause mid-RPC without synthetic database latency injection).*
 
 ---
 
@@ -345,20 +334,25 @@ This section documents the actual technical bugs encountered during the workload
 * **Diagnosis:** `PooledDB` was configured with `mincached=5`, forcing immediate TCP socket creation on module import while MySQL was still initializing its InnoDB storage engine.
 * **Fix:** Configured `mincached=0` (Lazy Initialization). Connection sockets are deferred until the first HTTP request or readiness probe arrives.
 
-### 4. CORS Preflight `OPTIONS` 401 Interception at Gateway
+### 4. Spec-Invalid Wildcard CORS with Credentials
+* **Symptom:** Browser rejected API Gateway responses with credentials mode enabled when configured with `allow_origins=["*"]`.
+* **Diagnosis:** The W3C CORS specification forbids wildcard origins when `allow_credentials` is true.
+* **Fix:** Replaced wildcard origin with explicit environment-bound origins (`CORS_ORIGINS` defaulting to `http://localhost:8080`).
+
+### 5. CORS Preflight `OPTIONS` 401 Interception at Gateway
 * **Symptom:** Browser failed to load dashboard balances; terminal logs revealed `OPTIONS /api/account/me HTTP/1.1 401 Unauthorized`.
 * **Diagnosis:** The API Gateway JWT authentication middleware intercepted browser preflight `OPTIONS` requests before the CORS middleware could negotiate access headers.
 * **Fix:** Added an explicit preflight bypass: `if request.method == "OPTIONS": return await call_next(request)` at the top of the Gateway middleware stack.
 
-### 5. Incognito Cross-Tab `localStorage` Contamination
+### 6. Incognito Cross-Tab `localStorage` Contamination
 * **Symptom:** Opening a second incognito tab automatically logged into the user account of the first tab, preventing multi-user transfer testing.
 * **Diagnosis:** Web browsers share `localStorage` across all incognito tabs in the same session window.
 * **Fix:** Switched client token storage to **`sessionStorage`**, guaranteeing complete per-tab session isolation.
 
-### 6. Split-Brain Zombie Worker Hazard
-* **Symptom:** A stalled worker waking up after a 10-second timeout could execute parallel mutations alongside a reclaimed retry.
-* **Diagnosis:** A simple Compare-And-Swap lacks a fencing token to gate the final commit transaction.
-* **Fix:** Added monotonic `lease_version` integer column. The Phase 3 update checks `WHERE lease_version = acquired_version`; if `rowcount != 1`, the stalled worker rolls back immediately.
+### 7. Ambiguous Network Timeout vs. Destructive Compensation Hazard
+* **Symptom:** Onboarding grants that timed out over the network could trigger local user deletion, causing foreign-key crashes and unallocated treasury debits.
+* **Diagnosis:** Network timeouts are ambiguous states; deleting state on timeout violates distributed computing safety.
+* **Fix:** Switched onboarding keys to deterministic values (`grant-user-{id}`) without random UUIDs and eliminated local deletes, making grant RPCs safely retryable.
 
 ---
 
@@ -368,9 +362,8 @@ Quick reference for architectural verification screenshots.
 
 | File | Shows | Section |
 |---|---|---|
-| `screenshots/login-screen.png` | Nexora Bank Authentication Interface | Local Development |
+| `screenshots/signup-screen.png` | Nexora Bank Authentication Interface | Local Development |
 | `screenshots/dashboard-ahmed.png` | Ahmed Dashboard ($1,000.00 Balance & Treasury Grant) | System Verification |
-| `screenshots/transfer-success.png` | Peer-to-Peer Transfer to Sarah ($250.00) | System Verification |
-| `screenshots/dashboard-sarah.png` | Sarah Dashboard ($1,250.00 Balance & Incoming Credit) | System Verification |
+| `screenshots/dashboard-omar.png` | omar Dashboard ($1,250.00 Balance & Incoming Credit) | System Verification |
 | `screenshots/docker-compose-up.png` | All 7 Microservice Containers Healthy | Local Development |
 | `screenshots/prometheus-metrics.png` | Golden Signals Scraped on `/metrics` | Observability |
