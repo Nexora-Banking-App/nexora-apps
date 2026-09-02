@@ -18,7 +18,7 @@ INTERNAL_SERVICE_SECRET = os.getenv("INTERNAL_SERVICE_SECRET", "nexora-internal-
 db_pool = PooledDB(
     creator=pymysql,
     maxconnections=10,
-    mincached=0,
+    mincached=0,  # Lazy initialization
     maxcached=2,
     host=os.getenv("DB_HOST", "localhost"),
     user=os.getenv("DB_USER", "root"),
@@ -127,9 +127,12 @@ def login(user: UserLogin):
     if not record or not bcrypt.checkpw(user.password.encode('utf-8'), record['password_hash'].encode('utf-8')):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
+    # Role & Scope-Enriched 15-Minute Access Token
     payload = {
         "user_id": record["id"],
         "username": record["username"],
+        "role": "customer",
+        "scope": ["account:read", "transfer:create"],
         "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=15),
         "iat": datetime.datetime.utcnow()
     }

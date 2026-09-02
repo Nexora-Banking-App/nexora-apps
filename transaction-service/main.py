@@ -87,15 +87,23 @@ def record_terminal_decline(user_id: int, key: str, message: str, status_code: i
     raise HTTPException(status_code=status_code, detail=message)
 
 # =============================================================================
-# 1. INTERNAL SYSTEM TRANSFER (Constant-Time Verified Treasury Grants)
+# 1. INTERNAL SYSTEM TRANSFER (Scoped Strictly to Treasury Reserve with Constant-Time Check)
 # =============================================================================
 @app.post("/internal/system-transfer")
 async def execute_system_transfer(
     payload: SystemTransferPayload,
     x_internal_key: str = Header(..., alias="X-Internal-Service-Key")
 ):
+    # Constant-time comparison to prevent timing attacks
     if not secrets.compare_digest(x_internal_key, INTERNAL_SERVICE_SECRET):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized internal service call")
+
+    # Least-Privilege Scoping: Restrict system transfers strictly to Treasury Reserve (User ID 1)
+    if payload.sender_id != 1:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Forbidden: System transfer key is restricted strictly to Treasury Reserve debits (sender_id=1)"
+        )
 
     sender_id = payload.sender_id
     receiver_id = payload.receiver_id

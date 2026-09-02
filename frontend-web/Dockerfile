@@ -1,9 +1,8 @@
 FROM nginx:alpine
 
-# Copy our custom HTML
+# Security: Disable Nginx version banner
+COPY default.conf /etc/nginx/conf.d/default.conf
 COPY index.html /usr/share/nginx/html/index.html
 
-# Expose Nginx port
 EXPOSE 80
-
 CMD ["nginx", "-g", "daemon off;"]

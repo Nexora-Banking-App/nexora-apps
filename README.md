@@ -1,6 +1,6 @@
 # Nexora Core Banking Platform: Workload Architecture & Engineering Reference
 
-An institutional-grade, distributed core banking application workload designed for the **Nexora Enterprise GitOps Platform**. This project demonstrates a Zero-Trust microservices architecture with edge token verification, a Two-Phase Lease idempotency engine with monotonic **Fencing Tokens**, double-entry bookkeeping, automated concurrency test suites, and ACID-compliant distributed locking.
+An institutional-grade, distributed core banking application workload designed for the **Nexora Enterprise GitOps Platform**. This project demonstrates a Zero-Trust microservices architecture with edge token verification, a Two-Phase Lease idempotency engine with monotonic **Fencing Tokens**, double-entry bookkeeping, scoped internal RPC authorization, automated concurrency test suites, and ACID-compliant distributed locking.
 
 ---
 
@@ -14,12 +14,14 @@ An institutional-grade, distributed core banking application workload designed f
 6. [Microservice Domain & Service Specifications](#microservice-domain--service-specifications)
 7. [Financial Concurrency & Fencing-Token Engine](#financial-concurrency--fencing-token-engine)
 8. [Failure Decision & Idempotency State Matrix](#failure-decision--idempotency-state-matrix)
-9. [Secrets & Configuration Management](#secrets--configuration-management)
-10. [Container Optimization & Multi-Stage Builds](#container-optimization--multi-stage-builds)
-11. [Metrics & Observability Instrumentation](#metrics--observability-instrumentation)
-12. [Automated Concurrency Testing & System Verification](#automated-concurrency-testing--system-verification)
-13. [Real-World Troubleshooting & Solutions](#real-world-troubleshooting--solutions)
-14. [Screenshots Index](#screenshots-index)
+9. [Security Hardening: Least Privilege & Information Disclosure](#security-hardening-least-privilege--information-disclosure)
+10. [Secrets & Configuration Management](#secrets--configuration-management)
+11. [Container Optimization & Multi-Stage Builds](#container-optimization--multi-stage-builds)
+12. [Metrics & Observability Instrumentation](#metrics--observability-instrumentation)
+13. [Automated Concurrency Testing & System Verification](#automated-concurrency-testing--system-verification)
+14. [Real-World Troubleshooting & Solutions](#real-world-troubleshooting--solutions)
+15. [Known Limitations & Phase 1 Infrastructure Scope](#known-limitations--phase-1-infrastructure-scope)
+16. [Screenshots Index](#screenshots-index)
 
 ---
 
@@ -29,11 +31,11 @@ The Nexora banking workload is structured as a polyglot, domain-driven microserv
 
 | Service | Technology | Responsibility | Port |
 |---|---|---|---|
-| `frontend-web` | NGINX 1.25 / Alpine / Vanilla JS / Tailwind | Client Single-Page App (SPA), Tab-isolated Session Manager | 8080 (Mapped: 80) |
-| `api-gateway` | Python 3.11 / FastAPI / Asynchronous `httpx` | Edge Rate-Limiting, Distributed Tracing (`X-Correlation-ID`), JWT Verification | 8000 |
-| `auth-service` | Python 3.11 / FastAPI / `bcrypt` / `PyJWT` | Identity Management, Password Hashing, Deterministic Grant Delegation | 8000 (Internal) |
+| `frontend-web` | NGINX 1.25 / Alpine / Vanilla JS / Tailwind | Client Single-Page App (SPA), Tab-isolated Session Manager, Version-Banner Suppressed | 8080 (Mapped: 80) |
+| `api-gateway` | Python 3.11 / FastAPI / Asynchronous `httpx` | Edge Rate-Limiting, Distributed Tracing (`X-Correlation-ID`), JWT Verification, Server Header Stripping | 8000 |
+| `auth-service` | Python 3.11 / FastAPI / `bcrypt` / `PyJWT` | Identity Management, Password Hashing, Scoped Token Minting, Deterministic Grant Delegation | 8000 (Internal) |
 | `account-service` | Python 3.11 / FastAPI / `DBUtils` / `PyMySQL` | Strictly Read-Only CQRS Ledger, Paginated Account Queries | 8000 (Internal) |
-| `transaction-service` | Python 3.11 / FastAPI / `Decimal` / `httpx` | Sole Mutation Authority, Deterministic Locks, Fencing-Token Lease Engine | 8000 (Internal) |
+| `transaction-service` | Python 3.11 / FastAPI / `Decimal` / `httpx` | Sole Mutation Authority, Deterministic Locks, Fencing-Token Lease Engine, Treasury-Scoped Internal RPC | 8000 (Internal) |
 | `fraud-service` | Python 3.11 / FastAPI / `prometheus-fastapi` | CPU-Intensive Risk Engine, HPA & Prometheus Golden Signals Target | 8000 (Internal) |
 | `mysql-db` / AWS RDS | MySQL 8.0 (InnoDB) | Relational ACID Persistence, Row-Level Locking, Composite Unique Constraints | 3306 |
 
@@ -66,10 +68,9 @@ http://localhost:8080
 * In **Tab 2**, observe omar's balance update to **$1,250.00** and Ahmed's balance update to **$750.00**.
 
 ```text
-
-Note: Giving each user $1000 on signup is designed for testing purporses and not a real scenario.
-
+Note: Giving each user $1000 on signup is designed for testing purposes and not a real scenario.
 ```
+
 ---
 
 ## Architecture
@@ -86,9 +87,10 @@ Note: Giving each user $1000 on signup is designed for testing purporses and not
          • SPA Dashboard (Tailwind CSS)                  • Perimeter Rate Limiting (Sliding Window)
          • Client-Side UUID Idempotency-Keys             • Distributed Tracing (X-Correlation-ID)
          • Tab-Isolated Session Storage                  • Edge JWT Verification & Claim Stripping
-                                                         • Spec-Valid CORS (Explicit Origins)
+         • server_tokens off (No Version Banner)         • Spec-Valid CORS (Explicit Origins)
                                                          • Transparent CORS OPTIONS Bypass
                                                          • Trusted Downstream Header Injection (X-User-Id)
+                                                         • Outbound Server Header Stripping
                                                                      │
                        ┌─────────────────────────────────────────────┼─────────────────────────────────────────────┐
                        │                                             │                                             │
@@ -96,9 +98,10 @@ Note: Giving each user $1000 on signup is designed for testing purporses and not
              [ auth-service ]                              [ account-service ]                           [ transaction-service ]
              • Salting & Bcrypt Hashing                    • Strictly Read-Only CQRS Ledger              • 1. Phase 1: Fast Lease (<1ms)
              • 15-min JWT Minting (HS256)                  • Paginated Queries (Limit/Offset)            • 2. Phase 2: Unconnected Fraud RPC
-             • Deterministic Grant RPC Delegation          • Zero Side Effects on GET /account/me        • 3. Phase 3: Fast Mutation (<5ms)
-             • Lazy Connection Pooling                     • Lazy Connection Pooling                     • 4. Monotonic Fencing Tokens
-             • Lifespan Graceful Draining                  • Lifespan Graceful Draining                  • 5. Sole Ledger Mutation Authority
+             • Role & Scope-Enriched Claims                • Zero Side Effects on GET /account/me        • 3. Phase 3: Fast Mutation (<5ms)
+             • Deterministic Grant RPC Delegation          • Lazy Connection Pooling                     • 4. Monotonic Fencing Tokens
+             • Lazy Connection Pooling                     • Lifespan Graceful Draining                  • 5. Sole Ledger Mutation Authority
+             • Lifespan Graceful Draining                                                                • 6. Treasury-Scoped Internal RPC
                        │                                             │                                             │
                        │ (Pooled DB Connections)                     │ (Pooled DB Connections)                     │ (Pooled DB Connections)
                        └─────────────────────────────────────────────┼─────────────────────────────────────────────┘
@@ -143,16 +146,19 @@ docker compose up --build
 ### 1. `frontend-web`
 * **Session Management:** Stores short-lived access tokens in `sessionStorage` rather than `localStorage`, enabling isolated multi-tab concurrent user simulation.
 * **Idempotency Generation:** Automatically generates a client-side UUID (`crypto.randomUUID()`) attached as an `Idempotency-Key` header on every financial mutation.
+* **Information Disclosure Hardening:** `server_tokens off` in the Nginx configuration suppresses the version banner from all HTTP responses.
 
 ### 2. `api-gateway`
 * **Perimeter Rate Limiting:** Enforces in-memory sliding-window throttles (`/login`: max 5 req/min per IP; `/signup`: max 3 req/hr per IP).
 * **Distributed Tracing:** Inspects incoming traffic for `X-Correlation-ID`. If missing, mints a UUID and propagates it across downstream HTTP headers and client responses.
 * **Edge Authentication:** Verifies JWT signatures (`HS256`, 15-minute expiration), drops untrusted client headers, and injects verified `X-User-Id` and `X-Username` headers downstream.
 * **CORS Specification:** Strictly enforces explicit allowed origins (`CORS_ORIGINS`) with `allow_credentials=True` and provides an unauthenticated bypass for HTTP `OPTIONS` preflight checks.
+* **Information Disclosure Hardening:** Strips the outbound `server` header from every proxied response, preventing Uvicorn version fingerprinting.
 
 ### 3. `auth-service`
 * **Password Hashing:** 12-round salted hashing using the official C-optimized `bcrypt` library.
 * **Atomic Identity Provisioning:** Creates user credentials and opens an account with `$0.00` in a single SQL transaction.
+* **Scoped Token Minting:** Issues JWTs enriched with `role: customer` and `scope: [account:read, transfer:create]` claims, establishing a forward-compatible least-privilege model without requiring a schema migration to add new roles later.
 * **Deterministic Grant Delegation:** Delegates the $1,000.00 welcome grant to `transaction-service` using a deterministic key (`grant-user-{id}`). In case of network timeouts, local state is preserved without destructive rollbacks, making the grant safely retryable.
 
 ### 4. `account-service`
@@ -161,6 +167,7 @@ docker compose up --build
 
 ### 5. `transaction-service`
 * **Sole Mutation Authority:** The single service in the entire platform permitted to alter account balances. Exposes `/transfer` (customer peer-to-peer) and `/internal/system-transfer` (constant-time verified system grants via `secrets.compare_digest`).
+* **Treasury-Scoped Internal RPC (Least Privilege):** `/internal/system-transfer` rejects any request where `sender_id != 1` with `HTTP 403 Forbidden`. The internal service secret authenticates the *caller*, but this guard additionally restricts *what* the caller is authorized to do — a leaked key can only ever debit the Treasury Reserve, never move funds between arbitrary user accounts.
 * **Deterministic Lock Ordering:** Sorts sender and receiver IDs (`min(sender, receiver)` -> `max(sender, receiver)`) before acquiring `SELECT ... FOR UPDATE` row locks, mathematically preventing deadlocks.
 * **Exact Decimal Math:** Python `Decimal` + SQL `DECIMAL(15,2)` strictly enforced.
 
@@ -171,7 +178,6 @@ docker compose up --build
 ![alt text](screenshots/signup-screen.png)
 ![alt text](screenshots/dashboard-ahmed.png)
 ![alt text](screenshots/dashboard-omar.png)
-
 
 ---
 
@@ -225,6 +231,54 @@ WHERE user_id = ? AND idempotency_key = ? AND lease_version = ?;
 | **Fraud Engine Timeout (2s)** | Transient System Failure | Phase 2 | **NO (0 connections)** | Row deleted (Unconsumed) | Re-executes as a new attempt |
 | **Worker Pod Crashes Mid-Flight** | Unhandled Process Death | Phase 2 | **NO (0 connections)** | `PROCESSING` (Stale >10s) | Next retry reclaims lease via CAS + increments `lease_version` |
 | **Zombie Worker Awakens** | Split-Brain Race Condition | Phase 3 | Yes (<1ms check) | Unchanged (`COMPLETED`) | Rollback triggered; returns `HTTP 409 Conflict` |
+| **System Transfer with sender_id != 1** | Privilege Escalation Attempt | Pre-Phase 1 | No connection checked out | No record created | Returns `HTTP 403 Forbidden` immediately |
+
+---
+
+## Security Hardening: Least Privilege & Information Disclosure
+
+Two application-layer hardening passes were applied on top of the core concurrency and identity model, closing gaps standard in a fintech security review.
+
+### 1. Information Disclosure Prevention (Banner Grabbing)
+By default, both Nginx and Uvicorn advertise their exact software version in the `Server` response header, giving an attacker a direct lookup table of known CVEs to try first.
+* **`frontend-web`:** `server_tokens off;` set in the Nginx server block, removing the version string from every response.
+* **`api-gateway`:** The response-handling middleware explicitly deletes the `server` header from every outgoing response before it reaches the client, regardless of what Uvicorn attaches by default.
+
+```python
+response = await call_next(request)
+response.headers["X-Correlation-ID"] = correlation_id
+if "server" in response.headers:
+    del response.headers["server"]
+return response
+```
+
+### 2. Least-Privilege Scoping (Internal RPC & Token Claims)
+Authentication proves *who* is calling; authorization should still constrain *what* they're allowed to do once verified. Two guards were added on that basis:
+
+* **Treasury-Scoped Internal Transfers:** `/internal/system-transfer` in `transaction-service` now rejects any request where `sender_id != 1` with `403 Forbidden`, even if the caller presents a valid `X-Internal-Service-Key`. Previously, possession of that one shared secret was sufficient to move funds between *any* two accounts on the platform; it is now hard-restricted to Treasury Reserve debits only, matching its actual intended purpose (onboarding grants).
+* **Scoped JWT Claims:** Access tokens minted by `auth-service` now carry `role: "customer"` and `scope: ["account:read", "transfer:create"]` claims. No endpoint currently enforces these claims (there is only one role today), but the claim shape is in place so a future role (e.g., `support`, `admin`) or a narrower scope check can be added at the gateway or service level without a breaking change to the token format.
+
+```python
+if payload.sender_id != 1:
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Forbidden: System transfer key is restricted strictly to Treasury Reserve debits (sender_id=1)"
+    )
+```
+
+**Verification:**
+```bash
+# Server header stripping
+curl -I http://localhost:8000/health/liveness
+# (No "server: uvicorn" header present)
+
+# Treasury-scoping enforcement
+curl -i -X POST "http://localhost:8000/internal/system-transfer" \
+  -H "X-Internal-Service-Key: nexora-internal-secret-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{"sender_id": 2, "receiver_id": 3, "amount": "50.00", "idempotency_key": "hack-1"}'
+# -> 403 Forbidden: System transfer key is restricted strictly to Treasury Reserve debits
+```
 
 ---
 
@@ -235,7 +289,7 @@ Configuration and secrets are strictly decoupled from application code following
 * **Environment Variables:**
   * `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`: Database target connectivity.
   * `JWT_SECRET`: Secret key for HS256 token minting and perimeter validation.
-  * `INTERNAL_SERVICE_SECRET`: Constant-time verified key (`secrets.compare_digest`) for internal RPC calls.
+  * `INTERNAL_SERVICE_SECRET`: Constant-time verified key (`secrets.compare_digest`) for internal RPC calls, additionally scoped server-side to Treasury-only operations.
   * `CORS_ORIGINS`: Comma-separated allowed origins (e.g. `http://localhost:8080`).
   * `FRAUD_SVC_URL`, `ACCOUNT_SVC_URL`, `TRANSACTION_SVC_URL`, `AUTH_SVC_URL`: Service discovery endpoints.
 * **Kubernetes Integration (Upcoming Phase 3):**
@@ -268,6 +322,17 @@ EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
+`frontend-web` follows the same hardening discipline at the web-server layer:
+
+```dockerfile
+FROM nginx:alpine
+# Security: Disable Nginx version banner (server_tokens off in default.conf)
+COPY default.conf /etc/nginx/conf.d/default.conf
+COPY index.html /usr/share/nginx/html/index.html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+```
+
 ---
 
 ## Metrics & Observability Instrumentation
@@ -283,6 +348,7 @@ Every microservice instruments FastAPI via `prometheus-fastapi-instrumentator` e
 The API Gateway generates or propagates an `X-Correlation-ID` header across all downstream RPCs, tying client requests, microservice logs, and database errors into a single unified trace.
 
 ![alt text](screenshots/prometheus-metrics.png)
+
 ---
 
 ## Automated Concurrency Testing & System Verification
@@ -311,7 +377,7 @@ tests/test_concurrency.py::test_bidirectional_transfers_no_deadlock PASSED   [10
 
 ![](screenshots/test.png)
 
-*(Note: The fencing token commit gate is verified by database constraint enforcement and code analysis, as black-box HTTP tests cannot easily simulate an asynchronous OS thread pause mid-RPC without synthetic database latency injection).*
+*(Note: The fencing token commit gate and the treasury-scoping guard are verified by database constraint enforcement, direct `curl` testing, and code analysis, as black-box HTTP tests cannot easily simulate an asynchronous OS thread pause mid-RPC without synthetic database latency injection).*
 
 ---
 
@@ -353,6 +419,24 @@ This section documents the actual technical bugs encountered during the workload
 * **Symptom:** Onboarding grants that timed out over the network could trigger local user deletion, causing foreign-key crashes and unallocated treasury debits.
 * **Diagnosis:** Network timeouts are ambiguous states; deleting state on timeout violates distributed computing safety.
 * **Fix:** Switched onboarding keys to deterministic values (`grant-user-{id}`) without random UUIDs and eliminated local deletes, making grant RPCs safely retryable.
+
+### 8. Unscoped Internal Service Key (Privilege Escalation Risk)
+* **Symptom:** `INTERNAL_SERVICE_SECRET`, while constant-time verified, granted the ability to debit *any* account, not just the Treasury Reserve — the key authenticated the caller but placed no limit on the action.
+* **Diagnosis:** Authentication (proving who is calling) had not been paired with authorization (limiting what the caller may do) on the internal RPC path.
+* **Fix:** Added an explicit `sender_id != 1` guard rejecting any system transfer not originating from the Treasury Reserve account, regardless of key validity.
+
+---
+
+## Known Limitations & Phase 1 Infrastructure Scope
+
+The application layer is intentionally scoped to what belongs in code. The following are known, named gaps — not oversights — deferred to infrastructure phases:
+
+* **No TLS/HTTPS:** All traffic (browser-to-gateway and service-to-service) currently runs over plain HTTP. TLS termination requires a Load Balancer/Ingress with an attached certificate — infrastructure that doesn't exist in local Docker Compose. Planned for Phase 1 (AWS ALB / Kubernetes Ingress).
+* **No WAF:** No layer currently inspects payloads for generic attack signatures (SQLi patterns, known exploit shapes) ahead of the application-aware API gateway. Planned via AWS WAF attached to the Ingress in Phase 1.
+* **Rate limiting is single-replica only:** The gateway's sliding-window limiter is in-memory; under multiple `api-gateway` replicas, the effective limit multiplies per replica. A production deployment would move this to a shared store (Redis) or offload it to an infra-layer rate-limiting feature.
+* **No refresh tokens:** JWTs expire after 15 minutes with no silent renewal; the user must log in again. This is a deliberate trade-off (short blast radius vs. added complexity), not an oversight — revisiting it is tied to the HTTPS/cookie-security work in Phase 1.
+* **No internal mTLS / network policy enforcement:** Internal services currently trust the `X-User-Id` header on the assumption that only `api-gateway` can reach them. That assumption is not yet enforced at the network layer — any container on the same Docker network can currently reach internal services directly. Cilium NetworkPolicies (Phase 1) are required to make this a real guarantee rather than an implicit one.
+* **No automatic reconciliation for failed onboarding grants:** If the treasury grant RPC fails during signup, the account is left at $0.00 in a safely retryable state (deterministic idempotency key), but nothing currently triggers that retry automatically. A scheduled reconciliation job is a reasonable Phase 1+ addition.
 
 ---
 

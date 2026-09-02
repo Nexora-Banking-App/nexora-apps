@@ -69,7 +69,7 @@ app.add_middleware(
 )
 
 # -----------------------------------------------------------------------------
-# 4. EDGE GATEWAY MIDDLEWARE (CORS Bypass, Tracing, Rate-Limits, Auth)
+# 4. EDGE GATEWAY MIDDLEWARE (CORS, Tracing, Rate-Limits, Auth, Banner Stripping)
 # -----------------------------------------------------------------------------
 @app.middleware("http")
 async def gateway_middleware(request: Request, call_next):
@@ -135,6 +135,11 @@ async def gateway_middleware(request: Request, call_next):
 
     response = await call_next(request)
     response.headers["X-Correlation-ID"] = correlation_id
+    
+    # 5. Security: Strip Server Technology Header (Information Disclosure Prevention)
+    if "server" in response.headers:
+        del response.headers["server"]
+
     return response
 
 # -----------------------------------------------------------------------------
