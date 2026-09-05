@@ -1,30 +1,31 @@
-from fastapi import FastAPI, Request, Response, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
-from prometheus_fastapi_instrumentator import Instrumentator
-from contextlib import asynccontextmanager
-import httpx
 import os
 import uuid
-import jwt
 import time
+import jwt
+import httpx
 from collections import defaultdict
+from contextlib import asynccontextmanager
 
+from fastapi import FastAPI, Request, Response, HTTPException, status
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
+
+# --- Configuration ---
 JWT_SECRET = os.getenv("JWT_SECRET", "nexora-super-secret-key-change-in-prod")
 AUTH_URL = os.getenv("AUTH_SVC_URL", "http://auth-service:8000")
 ACCOUNT_URL = os.getenv("ACCOUNT_SVC_URL", "http://account-service:8000")
 TRANSACTION_URL = os.getenv("TRANSACTION_SVC_URL", "http://transaction-service:8000")
 INTERNAL_SERVICE_SECRET = os.getenv("INTERNAL_SERVICE_SECRET", "nexora-internal-secret-key-123")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080").split(",")
 
-# -----------------------------------------------------------------------------
-# 1. PERIMETER SLIDING-WINDOW RATE LIMITER (In-Memory)
-# -----------------------------------------------------------------------------
+# --- Rate Limiter ---
 class RateLimiter:
-    def __init__(self):
+    def __init__(self) -> None:
         self.requests = defaultdict(list)
 
     def is_allowed(self, key: str, max_requests: int, window_seconds: int) -> bool:
         now = time.time()
-        # Evict timestamps older than the sliding window
         self.requests[key] = [t for t in self.requests[key] if t > now - window_seconds]
         if len(self.requests[key]) >= max_requests:
             return False
@@ -33,10 +34,8 @@ class RateLimiter:
 
 rate_limiter = RateLimiter()
 
-# -----------------------------------------------------------------------------
-# 2. LIFESPAN CONTEXT HANDLER (Graceful Connection Draining)
-# -----------------------------------------------------------------------------
-http_client: httpx.AsyncClient = None
+# --- Application Lifecycle ---
+http_client: httpx.AsyncClient
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -46,19 +45,10 @@ async def lifespan(app: FastAPI):
         limits=httpx.Limits(max_keepalive_connections=50, max_connections=200)
     )
     yield
-    # Triggered on SIGTERM: Drain active HTTP sockets before termination
     await http_client.aclose()
 
 app = FastAPI(lifespan=lifespan)
 Instrumentator().instrument(app).expose(app)
-
-# -----------------------------------------------------------------------------
-# 3. CORS SPECIFICATION (Explicit Origins with Credentials Support)
-# -----------------------------------------------------------------------------
-CORS_ORIGINS = os.getenv(
-    "CORS_ORIGINS", 
-    "http://localhost:8080,http://127.0.0.1:8080,http://localhost,http://127.0.0.1"
-).split(",")
 
 app.add_middleware(
     CORSMiddleware,
@@ -68,98 +58,65 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------------------------------------------------------------
-# 4. EDGE GATEWAY MIDDLEWARE (CORS, Tracing, Rate-Limits, Auth, Banner Stripping)
-# -----------------------------------------------------------------------------
+# --- Middleware ---
 @app.middleware("http")
 async def gateway_middleware(request: Request, call_next):
-    # CRITICAL: Always bypass authentication for browser CORS preflight OPTIONS
     if request.method == "OPTIONS":
         return await call_next(request)
 
-    # 1. Distributed Tracing: Assign or propagate Correlation ID
     correlation_id = request.headers.get("X-Correlation-ID", str(uuid.uuid4()))
     request.state.correlation_id = correlation_id
     client_ip = request.client.host if request.client else "unknown"
 
-    # 2. Check if caller is an authorized internal service or automated test runner
     is_internal_test = request.headers.get("X-Internal-Service-Key") == INTERNAL_SERVICE_SECRET
+    path = request.url.path
 
-    # 3. Rate Limiting (Bypassed for authorized CI/CD test runners)
     if not is_internal_test:
-        path = request.url.path
         if path == "/api/login" and request.method == "POST":
             if not rate_limiter.is_allowed(f"login:{client_ip}", max_requests=5, window_seconds=60):
-                return Response(
-                    content='{"detail":"Too many login attempts. Please try again in 60 seconds."}', 
-                    status_code=429, 
-                    media_type="application/json"
-                )
+                return JSONResponse(status_code=429, content={"detail": "Too many login attempts. Please try again in 60 seconds."})
 
         if path == "/api/signup" and request.method == "POST":
             if not rate_limiter.is_allowed(f"signup:{client_ip}", max_requests=3, window_seconds=3600):
-                return Response(
-                    content='{"detail":"Signup quota exceeded for this IP. Try again later."}', 
-                    status_code=429, 
-                    media_type="application/json"
-                )
+                return JSONResponse(status_code=429, content={"detail": "Signup quota exceeded for this IP. Try again later."})
 
-    # 4. Edge JWT Authentication & Claim Extraction on Protected Routes
-    path = request.url.path
     if path.startswith("/api/account") or path.startswith("/api/transfer"):
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
-            return Response(
-                content='{"detail":"Missing or invalid Authorization Bearer token"}', 
-                status_code=401, 
-                media_type="application/json"
-            )
+            return JSONResponse(status_code=401, content={"detail": "Missing or invalid Authorization Bearer token"})
+        
         token = auth_header.split(" ")[1]
         try:
             payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            # Strip untrusted headers and store verified identity in request state
             request.state.user_id = str(payload["user_id"])
             request.state.username = str(payload["username"])
         except jwt.ExpiredSignatureError:
-            return Response(
-                content='{"detail":"Session expired. Please log in again."}', 
-                status_code=401, 
-                media_type="application/json"
-            )
+            return JSONResponse(status_code=401, content={"detail": "Session expired. Please log in again."})
         except jwt.InvalidTokenError:
-            return Response(
-                content='{"detail":"Invalid token signature."}', 
-                status_code=401, 
-                media_type="application/json"
-            )
+            return JSONResponse(status_code=401, content={"detail": "Invalid token signature."})
 
     response = await call_next(request)
     response.headers["X-Correlation-ID"] = correlation_id
     
-    # 5. Security: Strip Server Technology Header (Information Disclosure Prevention)
     if "server" in response.headers:
         del response.headers["server"]
 
     return response
 
-# -----------------------------------------------------------------------------
-# 5. REVERSE PROXY DISPATCHER
-# -----------------------------------------------------------------------------
-async def proxy_request(target_url: str, request: Request):
+# --- Reverse Proxy Logic ---
+async def proxy_request(target_url: str, request: Request) -> Response:
     headers = {
         "X-Correlation-ID": getattr(request.state, "correlation_id", str(uuid.uuid4())),
         "Content-Type": "application/json"
     }
-    # Propagate trusted identity claims to internal microservices
+    
     if hasattr(request.state, "user_id"):
         headers["X-User-Id"] = request.state.user_id
         headers["X-Username"] = request.state.username
 
-    # Propagate client idempotency keys
     if "Idempotency-Key" in request.headers:
         headers["Idempotency-Key"] = request.headers["Idempotency-Key"]
 
-    # Propagate internal service authorization if present
     if "X-Internal-Service-Key" in request.headers:
         headers["X-Internal-Service-Key"] = request.headers["X-Internal-Service-Key"]
 
@@ -178,21 +135,15 @@ async def proxy_request(target_url: str, request: Request):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Upstream service unavailable: {str(e)}")
 
-# -----------------------------------------------------------------------------
-# 6. ROUTE DEFINITIONS
-# -----------------------------------------------------------------------------
+# --- Routes ---
 @app.post("/api/signup")
-async def signup(request: Request):
-    return await proxy_request(f"{AUTH_URL}/signup", request)
+async def signup(request: Request): return await proxy_request(f"{AUTH_URL}/signup", request)
 
 @app.post("/api/login")
-async def login(request: Request):
-    return await proxy_request(f"{AUTH_URL}/login", request)
+async def login(request: Request): return await proxy_request(f"{AUTH_URL}/login", request)
 
 @app.get("/api/account/me")
-async def get_account(request: Request):
-    return await proxy_request(f"{ACCOUNT_URL}/account/me", request)
+async def get_account(request: Request): return await proxy_request(f"{ACCOUNT_URL}/account/me", request)
 
 @app.post("/api/transfer")
-async def transfer(request: Request):
-    return await proxy_request(f"{TRANSACTION_URL}/transfer", request)
+async def transfer(request: Request): return await proxy_request(f"{TRANSACTION_URL}/transfer", request)

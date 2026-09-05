@@ -10,7 +10,9 @@
     <!-- LOGIN -->
     <div id="loginScreen" class="bg-slate-800 p-8 rounded-xl shadow-2xl w-full max-w-sm border border-slate-700">
         <div class="flex items-center justify-center mb-6">
-            <svg class="w-10 h-10 text-blue-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"></path></svg>
+            <svg class="w-10 h-10 text-blue-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"></path>
+            </svg>
             <h1 class="text-3xl font-bold text-blue-400">Nexora Bank</h1>
         </div>
         <input id="loginUser" type="text" placeholder="Username" class="w-full mb-3 p-3 rounded bg-slate-700 text-white outline-none focus:ring-2 focus:ring-blue-500">
@@ -23,10 +25,10 @@
     <!-- SIGNUP -->
     <div id="signupScreen" class="hidden bg-slate-800 p-8 rounded-xl shadow-2xl w-full max-w-sm border border-slate-700">
         <h2 class="text-2xl font-bold text-blue-400 mb-6 text-center">Open an Account</h2>
-        <input id="regUser" type="text" placeholder="Username" class="w-full mb-3 p-3 rounded bg-slate-700 text-white outline-none">
-        <input id="regEmail" type="email" placeholder="Email Address" class="w-full mb-3 p-3 rounded bg-slate-700 text-white outline-none">
-        <input id="regPhone" type="tel" placeholder="Phone Number" class="w-full mb-3 p-3 rounded bg-slate-700 text-white outline-none">
-        <input id="regPass" type="password" placeholder="Password" class="w-full mb-6 p-3 rounded bg-slate-700 text-white outline-none">
+        <input id="regUser" type="text" placeholder="Username" class="w-full mb-3 p-3 rounded bg-slate-700 text-white outline-none focus:ring-2 focus:ring-blue-500">
+        <input id="regEmail" type="email" placeholder="Email Address" class="w-full mb-3 p-3 rounded bg-slate-700 text-white outline-none focus:ring-2 focus:ring-blue-500">
+        <input id="regPhone" type="tel" placeholder="Phone Number" class="w-full mb-3 p-3 rounded bg-slate-700 text-white outline-none focus:ring-2 focus:ring-blue-500">
+        <input id="regPass" type="password" placeholder="Password" class="w-full mb-6 p-3 rounded bg-slate-700 text-white outline-none focus:ring-2 focus:ring-blue-500">
         <button onclick="signup()" class="w-full bg-green-600 hover:bg-green-500 py-3 rounded-lg font-semibold mb-3 transition">Register ($1000 Grant)</button>
         <p class="text-center text-sm text-slate-400">Have an account? <button onclick="showScreen('loginScreen')" class="text-blue-400 hover:underline">Log in</button></p>
         <p id="signupError" class="text-red-400 text-center mt-3 text-sm hidden"></p>
@@ -35,20 +37,20 @@
     <!-- LOADING -->
     <div id="loadingScreen" class="hidden flex flex-col items-center justify-center">
         <div class="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-blue-500 mb-4"></div>
-        <h2 class="text-xl font-semibold text-blue-400">Setting up your ledger...</h2>
+        <h2 class="text-xl font-semibold text-blue-400">Securely provisioning ledger...</h2>
     </div>
 
     <!-- DASHBOARD -->
     <div id="dashboardScreen" class="hidden bg-slate-800 p-8 rounded-xl shadow-2xl w-full max-w-2xl border border-slate-700">
         <div class="flex justify-between items-center mb-6 border-b border-slate-700 pb-4">
-            <h1 class="text-2xl font-bold text-white">Welcome, <span id="dashUser" class="text-blue-400 font-semibold">User</span>!</h1>
+            <h1 class="text-2xl font-bold text-white">Welcome, <span id="dashUser" class="text-blue-400 font-semibold"></span>!</h1>
             <button onclick="logout()" class="text-sm text-slate-400 hover:text-white transition">Logout</button>
         </div>
         
         <div class="grid grid-cols-2 gap-6 mb-6">
             <div class="bg-slate-700 p-6 rounded-lg shadow-inner">
                 <h2 class="text-sm text-slate-400 uppercase tracking-wide">Available Balance</h2>
-                <p class="text-4xl font-mono mt-2 text-green-400 font-bold" id="balanceDisplay">$1,000.00</p>
+                <p class="text-4xl font-mono mt-2 text-green-400 font-bold" id="balanceDisplay">...</p>
             </div>
             <div class="bg-slate-700 p-6 rounded-lg shadow-inner">
                 <h2 class="text-sm text-slate-400 uppercase tracking-wide mb-3">Transfer Funds</h2>
@@ -84,17 +86,24 @@
                 phone: document.getElementById('regPhone').value.trim(),
                 password: document.getElementById('regPass').value
             };
-            const res = await fetch(`${API_URL}/signup`, { 
-                method: 'POST', 
-                body: JSON.stringify(body), 
-                headers: {'Content-Type':'application/json'} 
-            });
-            if(res.ok) {
-                showScreen('loadingScreen');
-                setTimeout(() => showScreen('loginScreen'), 1500);
-            } else {
-                const err = await res.json();
-                document.getElementById('signupError').innerText = err.detail || "Registration failed";
+            
+            try {
+                const res = await fetch(`${API_URL}/signup`, { 
+                    method: 'POST', 
+                    body: JSON.stringify(body), 
+                    headers: {'Content-Type':'application/json'} 
+                });
+                
+                if(res.ok) {
+                    showScreen('loadingScreen');
+                    setTimeout(() => showScreen('loginScreen'), 1500);
+                } else {
+                    const err = await res.json();
+                    document.getElementById('signupError').innerText = err.detail || "Registration failed";
+                    document.getElementById('signupError').classList.remove('hidden');
+                }
+            } catch (err) {
+                document.getElementById('signupError').innerText = "Network error. Gateway unreachable.";
                 document.getElementById('signupError').classList.remove('hidden');
             }
         }
@@ -103,22 +112,29 @@
             const usernameInput = document.getElementById('loginUser').value.trim();
             const passwordInput = document.getElementById('loginPass').value;
             
-            const res = await fetch(`${API_URL}/login`, { 
-                method: 'POST', 
-                body: JSON.stringify({username: usernameInput, password: passwordInput}), 
-                headers: {'Content-Type':'application/json'} 
-            });
-            const data = await res.json();
-            
-            if(res.ok) {
-                // Using sessionStorage so each tab is 100% independent!
-                sessionStorage.setItem("jwt_token", data.access_token);
-                sessionStorage.setItem("active_username", data.username);
-                document.getElementById('dashUser').innerText = data.username;
-                showScreen('dashboardScreen');
-                loadDashboard();
-            } else {
-                document.getElementById('loginError').innerText = data.detail || "Invalid credentials";
+            try {
+                const res = await fetch(`${API_URL}/login`, { 
+                    method: 'POST', 
+                    body: JSON.stringify({username: usernameInput, password: passwordInput}), 
+                    headers: {'Content-Type':'application/json'} 
+                });
+                
+                const data = await res.json();
+                
+                if(res.ok) {
+                    // Strict Session Storage: Isolated per tab, wiped when tab closes.
+                    sessionStorage.setItem("jwt_token", data.access_token);
+                    sessionStorage.setItem("active_username", data.username);
+                    
+                    document.getElementById('dashUser').innerText = data.username;
+                    showScreen('dashboardScreen');
+                    loadDashboard();
+                } else {
+                    document.getElementById('loginError').innerText = data.detail || "Invalid credentials";
+                    document.getElementById('loginError').classList.remove('hidden');
+                }
+            } catch (err) {
+                document.getElementById('loginError').innerText = "Network error. Gateway unreachable.";
                 document.getElementById('loginError').classList.remove('hidden');
             }
         }
@@ -151,13 +167,14 @@
                     
                     if (data.transactions && data.transactions.length > 0) {
                         document.getElementById('txTable').innerHTML = data.transactions.map(tx => {
+                            // Determine rendering direction: Did money enter or leave this specific user's account?
                             const isReceiver = tx.receiver_name === (data.username || username);
                             const sign = isReceiver ? '+' : '-';
                             const color = isReceiver ? 'text-green-400' : 'text-red-400';
                             const label = isReceiver ? `From ${tx.sender_name}` : `To ${tx.receiver_name}`;
                             
                             return `
-                            <tr class="border-b border-slate-600">
+                            <tr class="border-b border-slate-600 hover:bg-slate-700 transition-colors">
                                 <td class="p-3 text-slate-300 font-medium">${label}</td>
                                 <td class="p-3 font-mono font-bold text-right ${color}">${sign}$${parseFloat(tx.amount).toFixed(2)}</td>
                                 <td class="p-3 text-xs text-slate-400 text-right">${tx.timestamp}</td>
@@ -177,6 +194,8 @@
             const recv = document.getElementById('transferUser').value.trim();
             const amt = document.getElementById('transferAmount').value;
             const msgBox = document.getElementById('transferMsg');
+            
+            // Client-Side Idempotency Key Generation
             const idempotencyKey = crypto.randomUUID();
 
             msgBox.classList.remove('hidden', 'text-red-400', 'text-green-400');
@@ -197,6 +216,9 @@
                 if(res.ok) {
                     msgBox.classList.add('text-green-400');
                     msgBox.innerText = data.message;
+                    // Wipe inputs on success
+                    document.getElementById('transferUser').value = '';
+                    document.getElementById('transferAmount').value = '';
                     loadDashboard();
                 } else {
                     msgBox.classList.add('text-red-400');
@@ -213,7 +235,7 @@
             showScreen('loginScreen');
         }
 
-        // On initial tab load:
+        // Auto-login on tab refresh if active token exists in memory
         const savedToken = sessionStorage.getItem("jwt_token");
         if(savedToken) {
             showScreen('dashboardScreen');

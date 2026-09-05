@@ -1,22 +1,24 @@
+import os
+import json
+import httpx
+import pymysql
+import secrets
+from decimal import Decimal
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Header, status
 from pydantic import BaseModel, condecimal
 from prometheus_fastapi_instrumentator import Instrumentator
 from dbutils.pooled_db import PooledDB
-from contextlib import asynccontextmanager
-from decimal import Decimal
-import pymysql
-import os
-import httpx
-import json
-import secrets
 
+# --- Configuration ---
 FRAUD_SVC_URL = os.getenv("FRAUD_SVC_URL", "http://fraud-service:8000")
 INTERNAL_SERVICE_SECRET = os.getenv("INTERNAL_SERVICE_SECRET", "nexora-internal-secret-key-123")
 
 db_pool = PooledDB(
     creator=pymysql,
     maxconnections=20,
-    mincached=0,  # Lazy initialization
+    mincached=0,
     maxcached=5,
     host=os.getenv("DB_HOST", "localhost"),
     user=os.getenv("DB_USER", "root"),
@@ -25,7 +27,7 @@ db_pool = PooledDB(
     cursorclass=pymysql.cursors.DictCursor
 )
 
-http_client: httpx.AsyncClient = None
+http_client: httpx.AsyncClient
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -38,6 +40,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 Instrumentator().instrument(app).expose(app)
 
+# --- Models ---
 class TransferPayload(BaseModel):
     receiver_username: str
     amount: condecimal(gt=Decimal('0.00'), max_digits=15, decimal_places=2)
@@ -48,21 +51,9 @@ class SystemTransferPayload(BaseModel):
     amount: condecimal(gt=Decimal('0.00'), max_digits=15, decimal_places=2)
     idempotency_key: str
 
-@app.get("/health/liveness")
-def liveness(): return {"status": "alive"}
-
-@app.get("/health/readiness")
-def readiness():
-    try:
-        conn = db_pool.connection()
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT 1")
-        conn.close()
-        return {"status": "ready", "database": "connected"}
-    except Exception:
-        raise HTTPException(status_code=503, detail="Database pool unready")
-
-def record_terminal_decline(user_id: int, key: str, message: str, status_code: int, lease_version: int = None):
+# --- Helpers ---
+def record_terminal_decline(user_id: int, key: str, message: str, status_code: int, lease_version: int = None) -> None:
+    """Caches terminal business declines to prevent wasteful logic re-execution on retries."""
     conn = db_pool.connection()
     try:
         with conn.cursor() as cursor:
@@ -86,23 +77,34 @@ def record_terminal_decline(user_id: int, key: str, message: str, status_code: i
         conn.close()
     raise HTTPException(status_code=status_code, detail=message)
 
-# =============================================================================
-# 1. INTERNAL SYSTEM TRANSFER (Scoped Strictly to Treasury Reserve with Constant-Time Check)
-# =============================================================================
+# --- Routes ---
+@app.get("/health/liveness")
+def liveness(): return {"status": "alive"}
+
+@app.get("/health/readiness")
+def readiness():
+    try:
+        conn = db_pool.connection()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT 1")
+        conn.close()
+        return {"status": "ready", "database": "connected"}
+    except Exception:
+        raise HTTPException(status_code=503, detail="Database pool unready")
+
 @app.post("/internal/system-transfer")
 async def execute_system_transfer(
     payload: SystemTransferPayload,
     x_internal_key: str = Header(..., alias="X-Internal-Service-Key")
 ):
-    # Constant-time comparison to prevent timing attacks
+    """Execution endpoint restricted strictly to internal service operations (e.g. Treasury Grants)."""
     if not secrets.compare_digest(x_internal_key, INTERNAL_SERVICE_SECRET):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized internal service call")
 
-    # Least-Privilege Scoping: Restrict system transfers strictly to Treasury Reserve (User ID 1)
     if payload.sender_id != 1:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, 
-            detail="Forbidden: System transfer key is restricted strictly to Treasury Reserve debits (sender_id=1)"
+            detail="System transfer key is restricted strictly to Treasury Reserve debits"
         )
 
     sender_id = payload.sender_id
@@ -110,7 +112,7 @@ async def execute_system_transfer(
     amount: Decimal = payload.amount
     key = payload.idempotency_key
 
-    # Phase 1: Atomic Idempotency Claim
+    # Phase 1: Claim Idempotency Key
     conn = db_pool.connection()
     try:
         with conn.cursor() as cursor:
@@ -132,7 +134,7 @@ async def execute_system_transfer(
     finally:
         conn.close()
 
-    # Phase 3: Immediate Execution with Row Locks & Version Gating
+    # Phase 3: Execute Financial Mutation
     conn = db_pool.connection()
     try:
         with conn.cursor() as cursor:
@@ -158,7 +160,7 @@ async def execute_system_transfer(
 
             success_payload = {
                 "status": "success",
-                "message": f"${amount} system transfer executed from User {sender_id} to User {receiver_id}.",
+                "message": f"${amount} system transfer executed to User {receiver_id}.",
                 "idempotency_key": key
             }
             cursor.execute(
@@ -180,9 +182,6 @@ async def execute_system_transfer(
     finally:
         conn.close()
 
-# =============================================================================
-# 2. USER-INITIATED TRANSFER (Fencing-Token Guarded Pipeline)
-# =============================================================================
 @app.post("/transfer")
 async def execute_transfer(
     payload: TransferPayload,
@@ -190,18 +189,16 @@ async def execute_transfer(
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
     x_correlation_id: str = Header(None, alias="X-Correlation-ID")
 ):
+    """Customer-facing peer-to-peer transfer endpoint using Two-Phase Lease and Fencing Tokens."""
     sender_id = x_user_id
     amount: Decimal = payload.amount
     acquired_lease_version = 1
 
-    # =========================================================================
-    # PHASE 1: ATOMIC LEASE CLAIM & FENCING TOKEN MINTING (<1ms)
-    # =========================================================================
+    # --- Phase 1: Atomic Lease Claim & Fencing Token Minting (<1ms) ---
     conn = db_pool.connection()
     try:
         with conn.cursor() as cursor:
             try:
-                # Initial Lease Claim: lease_version = 1
                 cursor.execute(
                     "INSERT INTO idempotency_records (user_id, idempotency_key, status, lease_version) VALUES (%s, %s, 'PROCESSING', 1)",
                     (sender_id, idempotency_key)
@@ -209,7 +206,6 @@ async def execute_transfer(
                 conn.commit()
                 acquired_lease_version = 1
             except pymysql.err.IntegrityError:
-                # Key already exists: check if completed
                 cursor.execute(
                     "SELECT status, response_body FROM idempotency_records WHERE user_id = %s AND idempotency_key = %s",
                     (sender_id, idempotency_key)
@@ -222,7 +218,7 @@ async def execute_transfer(
                         raise HTTPException(status_code=400, detail=cached_res.get("message"))
                     return cached_res
 
-                # Atomic CAS Staleness Recovery with Monotonic Fencing Token Increment
+                # Atomic CAS Staleness Recovery
                 cursor.execute(
                     """
                     UPDATE idempotency_records 
@@ -238,7 +234,6 @@ async def execute_transfer(
                 if cursor.rowcount != 1:
                     raise HTTPException(status_code=409, detail="Transfer currently in flight. Please wait.")
 
-                # Read the newly minted fencing token
                 cursor.execute(
                     "SELECT lease_version FROM idempotency_records WHERE user_id = %s AND idempotency_key = %s",
                     (sender_id, idempotency_key)
@@ -248,9 +243,7 @@ async def execute_transfer(
     finally:
         conn.close()
 
-    # =========================================================================
-    # PHASE 2: SYNCHRONOUS FRAUD CHECK (0 DB Connections Held!)
-    # =========================================================================
+    # --- Phase 2: Synchronous Fraud Check (0 DB Connections Pinned) ---
     try:
         fraud_res = await http_client.get(
             f"{FRAUD_SVC_URL}/api/scan",
@@ -259,7 +252,6 @@ async def execute_transfer(
         if fraud_res.status_code != 200 or fraud_res.json().get("threat_level") != "low":
             record_terminal_decline(sender_id, idempotency_key, "Transaction declined by Fraud Detection Engine.", 403, acquired_lease_version)
     except httpx.RequestError:
-        # Transient System Failure: Delete lease only if our fencing token is still active
         conn = db_pool.connection()
         try:
             with conn.cursor() as cursor:
@@ -272,15 +264,12 @@ async def execute_transfer(
             conn.close()
         raise HTTPException(status_code=503, detail="Fraud engine unreachable. Transfer aborted for safety.")
 
-    # =========================================================================
-    # PHASE 3: FINANCIAL EXECUTION WITH FENCING-TOKEN VALIDATION (<5ms)
-    # =========================================================================
+    # --- Phase 3: Financial Execution with Fencing-Token Validation (<5ms) ---
     conn = db_pool.connection()
     try:
         with conn.cursor() as cursor:
             conn.begin()
 
-            # 1. Resolve Recipient
             cursor.execute("SELECT id FROM users WHERE username = %s", (payload.receiver_username,))
             receiver = cursor.fetchone()
             if not receiver:
@@ -292,29 +281,25 @@ async def execute_transfer(
                 conn.rollback()
                 record_terminal_decline(sender_id, idempotency_key, "Cannot transfer funds to yourself.", 400, acquired_lease_version)
 
-            # 2. Deterministic Ascending Lock Acquisition
             first_lock_id, second_lock_id = sorted([sender_id, receiver_id])
             cursor.execute("SELECT user_id, balance FROM accounts WHERE user_id = %s FOR UPDATE", (first_lock_id,))
             cursor.execute("SELECT user_id, balance FROM accounts WHERE user_id = %s FOR UPDATE", (second_lock_id,))
 
-            # 3. Validate Balance
             cursor.execute("SELECT balance FROM accounts WHERE user_id = %s", (sender_id,))
             sender_acc = cursor.fetchone()
             if not sender_acc or Decimal(str(sender_acc["balance"])) < amount:
                 conn.rollback()
                 record_terminal_decline(sender_id, idempotency_key, "Insufficient funds.", 400, acquired_lease_version)
 
-            # 4. Mutate Balances
             cursor.execute("UPDATE accounts SET balance = balance - %s WHERE user_id = %s", (amount, sender_id))
             cursor.execute("UPDATE accounts SET balance = balance + %s WHERE user_id = %s", (amount, receiver_id))
 
-            # 5. Insert Audit Record
             cursor.execute(
                 "INSERT INTO transactions (idempotency_key, sender_id, receiver_id, amount) VALUES (%s, %s, %s, %s)",
                 (idempotency_key, sender_id, receiver_id, amount)
             )
 
-            # 6. FENCING TOKEN COMMIT GATE: Validate lease ownership has not been revoked!
+            # Fencing Token Gate
             success_payload = {
                 "status": "success",
                 "message": f"${amount} transferred to {payload.receiver_username}.",
@@ -331,7 +316,6 @@ async def execute_transfer(
             )
 
             if cursor.rowcount != 1:
-                # FENCING TOKEN VIOLATION: Worker stalled in Phase 2; a retry reclaimed the lease!
                 conn.rollback()
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
