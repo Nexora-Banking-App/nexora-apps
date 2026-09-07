@@ -135,6 +135,15 @@ async def proxy_request(target_url: str, request: Request) -> Response:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Upstream service unavailable: {str(e)}")
 
+# --- Health Probes for Kubernetes Lifecycle ---
+@app.get("/health/liveness")
+def liveness(): 
+    return {"status": "alive"}
+
+@app.get("/health/readiness")
+def readiness(): 
+    return {"status": "ready"}
+
 # --- Routes ---
 @app.post("/api/signup")
 async def signup(request: Request): return await proxy_request(f"{AUTH_URL}/signup", request)
