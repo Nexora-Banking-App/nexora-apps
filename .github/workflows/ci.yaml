@@ -4,12 +4,12 @@ on:
   push:
     branches:
       - main
-    # Only trigger if Python files or Dockerfiles change
     paths:
       - '**/*.py'
       - '**/Dockerfile'
       - '**/requirements.txt'
       - 'frontend-web/**'
+      - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:
@@ -53,13 +53,11 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # 1. Self-Healing ECR Repository Check
       - name: Ensure ECR Repository Exists
         run: |
           aws ecr describe-repositories --repository-names "nexora/${{ matrix.service }}" --region us-east-1 || \
           aws ecr create-repository --repository-name "nexora/${{ matrix.service }}" --region us-east-1 --image-scanning-configuration scanOnPush=true
 
-      # 2. Build the Docker Image
       - name: Build Docker Image
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -70,18 +68,16 @@ jobs:
           # Save image name to file for Trivy to scan locally before pushing
           docker save $REGISTRY/$REPOSITORY:$IMAGE_TAG -o image.tar
 
-      # 3. Vulnerability Gating (Trivy)
       - name: Run Trivy CVE Vulnerability Scanner
         uses: aquasecurity/trivy-action@master
         with:
-          input: /github/workspace/image.tar
+          input: image.tar
           format: 'table'
           exit-code: '1' # Fails the build if vulnerabilities are found!
           ignore-unfixed: true
           vuln-type: 'os,library'
-          severity: 'CRITICAL' # Only fail on Critical CVEs
+          severity: 'CRITICAL'
 
-      # 4. Push to ECR (Only happens if Trivy passes!)
       - name: Push Docker Image to ECR
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -90,9 +86,9 @@ jobs:
         run: |
           docker push $REGISTRY/$REPOSITORY:$IMAGE_TAG
 
-      # 5. Cryptographic Image Signing (Cosign Keyless)
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3.5.0
+        
       - name: Sign the ECR Image
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -113,7 +109,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Nexora-Banking-App/app-manifests
-          token: ${{ secrets.GITOPS_PAT }} # We need a Personal Access Token to commit to another repo
+          token: ${{ secrets.GITOPS_PAT }}
           path: app-manifests
 
       - name: Update Kustomize Image Digests
@@ -122,7 +118,6 @@ jobs:
           IMAGE_TAG: ${{ needs.build-scan-push.outputs.image_tag }}
           REGISTRY: 800770414458.dkr.ecr.us-east-1.amazonaws.com
         run: |
-          # Automatically update kustomization.yaml to point to the new immutable SHA tag
           for service in frontend-web api-gateway auth-service account-service transaction-service fraud-service; do
             kustomize edit set image ghcr.io/nexora-platform/$service=$REGISTRY/nexora/$service:$IMAGE_TAG
           done
@@ -136,7 +131,7 @@ jobs:
           title: "🚀 Deploy: Promote staging workloads to ${{ needs.build-scan-push.outputs.image_tag }}"
           body: |
             ## Automated GitOps Promotion
-            This PR updates the staging Kustomize manifests to use the newly built, scanned, and signed image digests.
+            This PR updates the staging Kustomize manifests to use the newly scanned and signed image digests.
             
             **Commit SHA:** `${{ needs.build-scan-push.outputs.image_tag }}`
             
