@@ -6,9 +6,7 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 COPY requirements.txt .
-# CRITICAL FIX: Install requirements, then FORCE upgrade h11 to patch the CVE
-RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir --upgrade h11==0.16.0
+RUN pip install --no-cache-dir -r requirements.txt
 
 # STAGE 2: Runner
 FROM python:3.11-slim
