@@ -1,24 +1,24 @@
 # STAGE 1: Builder
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# CRITICAL FIX: Install requirements, then FORCE upgrade h11 to patch the CVE
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir --upgrade h11==0.16.0
 
 # STAGE 2: Runner
 FROM python:3.11-slim
 
 WORKDIR /app
-# Copy only the built dependencies from Stage 1
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 COPY main.py .
 
-# Security: Run as a non-root user
 RUN addgroup --system appgroup && adduser --system --group appuser
 USER appuser
 
