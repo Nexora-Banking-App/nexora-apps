@@ -136,13 +136,10 @@ async def proxy_request(target_url: str, request: Request) -> Response:
         raise HTTPException(status_code=502, detail=f"Upstream service unavailable: {str(e)}")
 
 # --- Health Probes for Kubernetes Lifecycle ---
-@app.get("/")
-def root():
-    return {"message": "Welcome to Nexora API Gateway v2.0 - Canary Active!"}
+
 
 @app.get("/health/liveness")
-def liveness(): 
-    return {"status": "alive"}
+def liveness(): return {"status": "alive", "version": "v2.0-canary"}
 
 @app.get("/health/readiness")
 def readiness(): 
