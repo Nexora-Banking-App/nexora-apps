@@ -72,7 +72,8 @@
     </div>
 
     <script>
-        const API_URL = "http://localhost:8000/api";
+        // Automatically routes to the Load Balancer /api path on any domain!
+        const API_URL = window.location.origin === "http://localhost:8080" ? "http://localhost:8000/api" : "/api";
 
         function showScreen(id) {
             ['loginScreen', 'signupScreen', 'loadingScreen', 'dashboardScreen'].forEach(s => document.getElementById(s).classList.add('hidden'));
