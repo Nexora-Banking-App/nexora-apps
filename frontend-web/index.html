@@ -197,7 +197,11 @@
             const msgBox = document.getElementById('transferMsg');
             
             // Client-Side Idempotency Key Generation
-            const idempotencyKey = crypto.randomUUID();
+            // Browser-safe UUID generation for non-HTTPS AWS Load Balancer testing
+            const idempotencyKey = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) { 
+    var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+});
 
             msgBox.classList.remove('hidden', 'text-red-400', 'text-green-400');
             msgBox.innerText = "Processing transfer...";
