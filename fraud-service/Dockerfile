@@ -25,5 +25,4 @@ RUN addgroup --system appgroup && adduser --system --group appuser
 USER appuser
 
 EXPOSE 8000
-# Spawns 4 parallel worker processes per container!
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
