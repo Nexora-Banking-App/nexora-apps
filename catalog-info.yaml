@@ -14,16 +14,45 @@ metadata:
   tags:
     - python
     - fastapi
-  links:
-    - url: https://github.com/Nexora-Banking-App/nexora-apps
-      title: Source Code
 spec:
   type: service
   lifecycle: production
   owner: edge-team
   system: nexora-core-banking
-  providesApis:
-    - nexora-public-api
+  dependsOn:
+    - component:auth-service
+    - component:account-service
+    - component:transaction-service
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: auth-service
+  description: User authentication, hashing, and token authority
+  tags:
+    - python
+    - bcrypt
+spec:
+  type: service
+  lifecycle: production
+  owner: identity-team
+  system: nexora-core-banking
+  dependsOn:
+    - component:transaction-service
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: account-service
+  description: Strictly read-only CQRS ledger balance inquiries
+  tags:
+    - python
+    - mysql
+spec:
+  type: service
+  lifecycle: production
+  owner: ledger-team
+  system: nexora-core-banking
 ---
 apiVersion: backstage.io/v1alpha1
 kind: Component
@@ -39,7 +68,7 @@ spec:
   owner: ledger-team
   system: nexora-core-banking
   dependsOn:
-    - component: fraud-service
+    - component:fraud-service
 ---
 apiVersion: backstage.io/v1alpha1
 kind: Component
@@ -53,4 +82,4 @@ spec:
   type: service
   lifecycle: production
   owner: risk-team
-  system: nexora-core-banking
+  system: nexora-core-banking   
