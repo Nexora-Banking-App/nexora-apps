@@ -85,14 +85,102 @@ def record_terminal_decline(user_id: int, key: str, message: str, status_code: i
             conn.commit()
     finally:
         conn.close()
-    # Explicitly raises exception so execution NEVER falls through!
     raise HTTPException(status_code=status_code, detail=message)
 
 # =============================================================================
-# THREAD-OFFLOADED SYNCHRONOUS DB WORKERS
+# 1. INTERNAL SYSTEM TRANSFER (For Treasury Onboarding Grants)
+# =============================================================================
+def _sync_system_transfer(sender_id: int, receiver_id: int, amount: Decimal, key: str) -> dict:
+    conn = db_pool.connection()
+    try:
+        with conn.cursor() as cursor:
+            # Phase 1: Claim Idempotency Key
+            try:
+                cursor.execute(
+                    "INSERT INTO idempotency_records (user_id, idempotency_key, status, lease_version) VALUES (%s, %s, 'PROCESSING', 1)",
+                    (sender_id, key)
+                )
+                conn.commit()
+            except pymysql.err.IntegrityError:
+                cursor.execute(
+                    "SELECT status, response_body FROM idempotency_records WHERE user_id = %s AND idempotency_key = %s",
+                    (sender_id, key)
+                )
+                existing = cursor.fetchone()
+                if existing and existing["status"] == "COMPLETED":
+                    return json.loads(existing["response_body"])
+                raise HTTPException(status_code=409, detail="System transfer in flight")
+
+            # Phase 3: Immediate Execution with Row Locks
+            conn.begin()
+            first_lock_id, second_lock_id = sorted([sender_id, receiver_id])
+            cursor.execute("SELECT user_id, balance FROM accounts WHERE user_id = %s FOR UPDATE", (first_lock_id,))
+            cursor.execute("SELECT user_id, balance FROM accounts WHERE user_id = %s FOR UPDATE", (second_lock_id,))
+
+            cursor.execute("SELECT balance FROM accounts WHERE user_id = %s", (sender_id,))
+            sender_acc = cursor.fetchone()
+            if not sender_acc or Decimal(str(sender_acc["balance"])) < amount:
+                conn.rollback()
+                record_terminal_decline(sender_id, key, "Treasury reserve depleted.", 500, lease_version=1)
+
+            cursor.execute("UPDATE accounts SET balance = balance - %s WHERE user_id = %s", (amount, sender_id))
+            cursor.execute("UPDATE accounts SET balance = balance + %s WHERE user_id = %s", (amount, receiver_id))
+
+            cursor.execute(
+                "INSERT INTO transactions (idempotency_key, sender_id, receiver_id, amount) VALUES (%s, %s, %s, %s)",
+                (key, sender_id, receiver_id, amount)
+            )
+
+            success_payload = {
+                "status": "success",
+                "message": f"${amount} system transfer executed to User {receiver_id}.",
+                "idempotency_key": key
+            }
+            cursor.execute(
+                """
+                UPDATE idempotency_records 
+                SET status = 'COMPLETED', response_body = %s 
+                WHERE user_id = %s AND idempotency_key = %s AND lease_version = 1
+                """,
+                (json.dumps(success_payload), sender_id, key)
+            )
+
+            conn.commit()
+            return success_payload
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+@app.post("/internal/system-transfer")
+async def execute_system_transfer(
+    payload: SystemTransferPayload,
+    x_internal_key: str = Header(..., alias="X-Internal-Service-Key")
+):
+    if not secrets.compare_digest(x_internal_key, INTERNAL_SERVICE_SECRET):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized internal service call")
+
+    if payload.sender_id != 1:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="System transfer key is restricted strictly to Treasury Reserve debits"
+        )
+
+    return await asyncio.to_thread(
+        _sync_system_transfer,
+        payload.sender_id,
+        payload.receiver_id,
+        payload.amount,
+        payload.idempotency_key
+    )
+
+# =============================================================================
+# 2. USER-INITIATED TRANSFER (For Customer Peer-to-Peer Transfers)
 # =============================================================================
 def _sync_claim_lease(sender_id: int, idempotency_key: str) -> dict:
-    """Threadpool worker: Claims the lease atomically without blocking asyncio event loop."""
     conn = db_pool.connection()
     try:
         with conn.cursor() as cursor:
@@ -132,7 +220,6 @@ def _sync_claim_lease(sender_id: int, idempotency_key: str) -> dict:
         conn.close()
 
 def _sync_db_phase(sender_id: int, receiver_username: str, amount: Decimal, idempotency_key: str, acquired_lease_version: int) -> dict:
-    """Threadpool worker: Executes row-locks, balance mutation, and audit log."""
     conn = db_pool.connection()
     try:
         with conn.cursor() as cursor:
@@ -196,9 +283,6 @@ def _sync_db_phase(sender_id: int, receiver_username: str, amount: Decimal, idem
     finally:
         conn.close()
 
-# =============================================================================
-# MAIN ASYNC ROUTE (100% Non-Blocking Event Loop)
-# =============================================================================
 @app.post("/transfer")
 async def execute_transfer(
     payload: TransferPayload,
