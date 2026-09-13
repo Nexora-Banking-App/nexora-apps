@@ -1,0 +1,56 @@
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: nexora-core-banking
+  description: The core banking transaction and ledger system
+spec:
+  owner: platform-team
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: api-gateway
+  description: Edge router and JWT authentication verification
+  tags:
+    - python
+    - fastapi
+  links:
+    - url: https://github.com/Nexora-Banking-App/nexora-apps
+      title: Source Code
+spec:
+  type: service
+  lifecycle: production
+  owner: edge-team
+  system: nexora-core-banking
+  providesApis:
+    - nexora-public-api
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: transaction-service
+  description: ACID execution engine with deterministic locking
+  tags:
+    - python
+    - mysql
+spec:
+  type: service
+  lifecycle: production
+  owner: ledger-team
+  system: nexora-core-banking
+  dependsOn:
+    - component: fraud-service
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: fraud-service
+  description: Compute-heavy mathematical risk assessment engine
+  tags:
+    - python
+    - hpa
+spec:
+  type: service
+  lifecycle: production
+  owner: risk-team
+  system: nexora-core-banking
