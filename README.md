@@ -57,8 +57,11 @@ The application is decomposed into six specialized services, enforcing strict do
 | `transaction-service` | Python / FastAPI | Sole mutation authority, ACID locking, idempotency | 8000 |
 | `fraud-service` | Python / FastAPI | Risk-scoring engine, HPA metrics target | 8000 |
 
-`account-service` and `transaction-service `are deliberately split along CQRS lines: `transaction-service` is the only service permitted to mutate the ledger, which keeps all concurrency-control logic (locking, fencing tokens) in one place. `account-service` only ever reads, so it can be scaled or cached independently of write load without risking the invariants above.
+```
+account-service and transaction-service are deliberately split along CQRS lines: transaction-service is the only service permitted to mutate the ledger, which keeps all concurrency-control logic (locking, fencing tokens) in one place. account-service only ever reads, so it can be scaled or cached independently of write load without risking the invariants above.
+```
 ---
+
 
 ## Quick Start & Local Development
 
