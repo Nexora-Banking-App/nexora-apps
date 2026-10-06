@@ -32,15 +32,37 @@ This repository contains the core application workloads and the **Secure Softwar
 
 ## Table of Contents
 
-1. [Platform Overview](#platform-overview)
-2. [Quick Start & Local Development](#quick-start--local-development)
-3. [Configuration](#configuration)
-4. [Application Architecture & Traffic Flow](#application-architecture--traffic-flow)
-5. [Financial Concurrency Engine](#financial-concurrency-engine)
-6. [Secure Software Supply Chain (CI)](#secure-software-supply-chain-ci)
-7. [System Verification & End-to-End Testing](#system-verification--end-to-end-testing)
-8. [Performance Benchmarking & Capacity Planning](#performance-benchmarking--capacity-planning)
-9. [Real-World Troubleshooting & Solutions](#real-world-troubleshooting--solutions)
+1. [Current Staging Deployment](#current-staging-deployment)
+2. [Platform Overview](#platform-overview)
+3. [Quick Start & Local Development](#quick-start--local-development)
+4. [Configuration](#configuration)
+5. [Application Architecture & Traffic Flow](#application-architecture--traffic-flow)
+6. [Financial Concurrency Engine](#financial-concurrency-engine)
+7. [Secure Software Supply Chain (CI)](#secure-software-supply-chain-ci)
+8. [System Verification & End-to-End Testing](#system-verification--end-to-end-testing)
+9. [Performance Benchmarking & Capacity Planning](#performance-benchmarking--capacity-planning)
+10. [Real-World Troubleshooting & Solutions](#real-world-troubleshooting--solutions)
+
+---
+
+## Current Staging Deployment
+
+The live staging environment was verified on **2026-10-06**. This repository supplies
+the six application services; Kubernetes deployment settings live in the separate
+`app-manifests` and `platform-config` repositories.
+
+| Area | Current staging configuration |
+|---|---|
+| EKS cluster | `nexora-staging`, Kubernetes `1.33` (`v1.33.13-eks-3b4a6ca`), `us-east-1` |
+| Worker group | Two `m7i-flex.large` nodes, autoscaling bounds 1–3 |
+| Application images | Amazon ECR, tag `8e48351` at verification |
+| Runtime | Istio sidecars; six services deployed, all healthy |
+| Database | Single-AZ MySQL RDS; credentials supplied from AWS Secrets Manager through External Secrets Operator |
+| Event streaming | Strimzi-managed Kafka 4.3.1, three KRaft broker/controller nodes, internal TLS and SCRAM-SHA-512 |
+
+Kafka connects `transaction-service`, `auth-service`, and `fraud-service` to the
+event topics declared in `platform-config`. The local Docker Compose stack remains
+available for development, but it is separate from the AWS-backed staging deployment.
 
 ---
 
@@ -296,4 +318,3 @@ This section documents actual technical bugs encountered during the application 
 * **Fix:** Switched onboarding keys to deterministic values (`grant-user-{id}`) instead of random UUIDs and eliminated local deletes, making grant RPCs safely retryable via the idempotency engine.
 
 ---
-
