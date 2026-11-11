@@ -18,7 +18,7 @@ jobs:
     name: "Python: compile, shared-module sync, unit tests"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -65,5 +65,5 @@ jobs:
     name: "docker-compose.yml is valid"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker compose config -q

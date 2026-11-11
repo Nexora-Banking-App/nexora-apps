@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set Image Tag Variable
         id: vars
@@ -108,7 +108,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout app-manifests repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: Nexora-Banking-App/app-manifests
           token: ${{ secrets.GITOPS_PAT }}
