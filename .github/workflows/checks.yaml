@@ -18,7 +18,7 @@ jobs:
     name: "Repo: shared module in sync, compose file valid"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Shared module is identical in every service
         run: scripts/sync-common.sh --check
       - name: docker-compose.yml is valid
@@ -33,9 +33,9 @@ jobs:
       matrix:
         service: [api-gateway, auth-service, account-service, transaction-service, fraud-service]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -73,7 +73,7 @@ jobs:
       matrix:
         service: [frontend-web, api-gateway, auth-service, account-service, transaction-service, fraud-service]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build image
         run: |
