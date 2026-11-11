@@ -77,7 +77,7 @@ The application is decomposed into six specialized services, enforcing strict do
 | `auth-service` | Python / FastAPI | Identity management, bcrypt hashing, onboarding grants | 8000 |
 | `account-service` | Python / FastAPI | Strictly read-only CQRS ledger, paginated queries | 8000 |
 | `transaction-service` | Python / FastAPI | Sole mutation authority, ACID locking, idempotency | 8000 |
-| `fraud-service` | Python / FastAPI | Risk-scoring engine, HPA metrics target | 8000 |
+| `fraud-service` | Python / FastAPI | Stateless rule-based risk scoring, Kafka event consumer, HPA target | 8000 |
 
 ```
 account-service and transaction-service are deliberately split along CQRS lines: transaction-service is the only service permitted to mutate the ledger, which keeps all concurrency-control logic (locking, fencing tokens) in one place. account-service only ever reads, so it can be scaled or cached independently of write load without risking the invariants above.
@@ -106,11 +106,19 @@ Sign up a new user, log in, and observe the pre-seeded $1,000.00 Treasury Grant 
 ![!\[Local Dashboard Screen\](screenshots/local-dashboard.png)
 ](screenshots/docker-compose-up.png)![Signup Screen](screenshots/signup-screen.png)
 
-**3. Run the Concurrency Test Suite**
+**3. Run the Concurrency Test Suite** (needs the stack from step 1)
 ```bash
 pip install pytest pytest-asyncio httpx
 pytest tests/test_concurrency.py -v
 ```
+
+**4. Run the unit tests** (no stack needed: fraud rules, API contract, log format)
+```bash
+pip install -r fraud-service/requirements.txt pytest httpx
+pytest tests/unit -v
+```
+
+The compose stack also starts a single-node Kafka so the outbox publisher and the fraud consumer run locally (plain text, no TLS).
 ![Concurrency test output](screenshots/test.png)
 
 ---
@@ -119,17 +127,30 @@ pytest tests/test_concurrency.py -v
 
 Each service reads its configuration from environment variables. In Kubernetes, these are injected via the External Secrets Operator (ESO) from AWS Secrets Manager; locally, `docker-compose.yml` supplies development defaults — **never commit real secret values**.
 
-| Variable | Used By | Purpose | Local Default |
+| Variable | Used By | Purpose | Default in code / local value |
 |---|---|---|---|
-| `DATABASE_URL` | auth, account, transaction-service | MySQL connection string | points to the local `mysql` compose service |
+| `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | auth, account, transaction-service | MySQL connection (there is no `DATABASE_URL`) | compose: `mysql-db` / `dbuser` / `dbpassword` / `nexora_bank` |
 | `JWT_SECRET` | api-gateway, auth-service | Signing key for issued JWTs | dev placeholder value |
-| `JWT_EXPIRY_MINUTES` | auth-service | Access token lifetime | `60` |
-| `INTERNAL_SERVICE_SECRET` | all backend services | Shared secret validating service-to-service calls at the mesh boundary | dev placeholder value |
+| `INTERNAL_SERVICE_SECRET` | api-gateway, auth-service, transaction-service | Shared secret for internal calls (`/internal/system-transfer`, rate-limit bypass in tests) | dev placeholder value |
+| `AUTH_SVC_URL`, `ACCOUNT_SVC_URL`, `TRANSACTION_SVC_URL` | api-gateway (auth-service uses `TRANSACTION_SVC_URL`) | Internal service addresses | `http://<service>:8000` |
 | `FRAUD_SVC_URL` | transaction-service | Internal DNS address of `fraud-service` | `http://fraud-service:8000` |
-| `DB_POOL_SIZE` | auth, account, transaction-service | Max connections per service in the PyMySQL/DBUtils pool | *(document the actual configured value here)* |
-| `UVICORN_WORKERS` | all backend services | Worker process count per container | `1` (see [Bottleneck Investigation](#performance-benchmarking--capacity-planning) — increasing this currently breaks Prometheus metrics) |
+| `CORS_ORIGINS` | api-gateway | Allowed browser origins | `http://localhost:8080,http://127.0.0.1:8080` |
+| `KAFKA_BOOTSTRAP_SERVERS` | transaction-service, fraud-service | Turns Kafka on. Unset = no outbox rows, no publisher, no consumer | compose: `kafka:9092` |
+| `KAFKA_SECURITY_PROTOCOL`, `KAFKA_SASL_MECHANISM`, `KAFKA_USERNAME`, `KAFKA_PASSWORD`, `KAFKA_CA_FILE` | transaction-service, fraud-service | Kafka security. Staging: `SASL_SSL` + `SCRAM-SHA-512` | compose: `PLAINTEXT` |
+| `KAFKA_CONSUMER_GROUP`, `KAFKA_TOPICS` | fraud-service | Consumer group and topics | `fraud-service`, `transactions.events` |
+| `FRAUD_*` thresholds | fraud-service | Rule thresholds, see [Fraud Rules](#fraud-rules) | see table there |
+| `FRAUD_SIMULATED_WORK_ITERATIONS` | fraud-service | Extra CPU work per scan for the HPA demo | `0` in code; `500000` in the Kubernetes manifests |
+| `GRANT_RETRY_ENABLED`, `GRANT_RETRY_INTERVAL_SECONDS`, `GRANT_RETRY_MIN_AGE_SECONDS` | auth-service | Welcome-grant retry task | `true`, `60`, `120` |
+| `LOG_LEVEL` | all Python services | Log level of the JSON logger | `INFO` |
+| `OTEL_SDK_DISABLED` and other `OTEL_*` | all Python services | Tracing. Off in the image; the Kubernetes manifests switch it on | `true` |
+| `WEB_CONCURRENCY` + `PROMETHEUS_MULTIPROC_DIR` | all Python services | Worker processes and multiprocess metrics, see [Multiple workers](#multiple-workers-opt-in) | unset (one worker) |
 
-In production/staging, `DATABASE_URL`, `JWT_SECRET`, and `INTERNAL_SERVICE_SECRET` are generated by AWS Secrets Manager and never appear in Git — see the platform-level `platform-config` repo for the ESO `SecretStore`/`ExternalSecret` definitions.
+Values that are **hardcoded** and not configurable:
+
+* **JWT lifetime:** 15 minutes (`auth-service/main.py`). There is no `JWT_EXPIRY_MINUTES` variable.
+* **DB connection pool** (`maxconnections` of the DBUtils pool, per pod): account-service 15, auth-service 10, transaction-service 20. There is no `DB_POOL_SIZE` variable.
+
+In staging, the `DB_*` values, `JWT_SECRET`, and `INTERNAL_SERVICE_SECRET` are generated by Terraform into AWS Secrets Manager and never appear in Git — see `app-manifests` for the `ExternalSecret` that projects them and `platform-config` for the `ClusterSecretStore`.
 
 ---
 
@@ -152,7 +173,10 @@ graph TD
     GATEWAY -- Internal DNS --> ACCOUNT
     GATEWAY -- Internal DNS --> TRANS
 
-    TRANS -- Sync HTTP --> FRAUD
+    TRANS -- "Sync HTTP (facts in, score out)" --> FRAUD
+    TRANS -. "outbox -> transactions.events" .-> KAFKA[("Kafka")]
+    KAFKA -. "consume" .-> FRAUD
+    FRAUD -. "fraud.alerts / DLQ" .-> KAFKA
 
     AUTH -- DBUtils Pool --> DB
     ACCOUNT -- DBUtils Pool --> DB
@@ -185,8 +209,9 @@ sequenceDiagram
 
     rect rgb(60, 30, 30)
         Note over TS,FS: PHASE 2: Risk Gating (no DB connection held)
-        TS->>FS: GET /api/scan (Timeout: 2.0s)
-        FS-->>TS: 200 OK (Threat: Low)
+        TS->>DB: Read fraud facts (velocity, 24h volume, account age)
+        TS->>FS: POST /api/scan with facts (Timeout: 2.0s)
+        FS-->>TS: 200 OK (threat_level, score, reasons)
     end
 
     rect rgb(30, 60, 30)
@@ -195,17 +220,63 @@ sequenceDiagram
         TS->>DB2: SELECT ... FOR UPDATE (Ordered by min_id -> max_id)
         TS->>DB2: UPDATE Balances
         TS->>DB2: UPDATE Idempotency WHERE lease_version = X
+        TS->>DB2: INSERT outbox event (same transaction)
         DB2-->>TS: COMMIT & Connection Released
     end
 
     TS-->>API: 200 OK (Success)
 ```
 
+A lease that stays `PROCESSING` for more than 10 seconds belonged to a worker that died mid-flight. A retry with the same key takes it over by bumping `lease_version`; the dead worker's final `UPDATE ... WHERE lease_version = old` then matches nothing. The same logic protects `/internal/system-transfer` (welcome grants).
+
+### Fraud Rules
+
+`fraud-service` keeps no state and has no database. `transaction-service` reads the facts from MySQL and sends them with each scan, so any number of HPA replicas return the same answer. The rules live in `fraud-service/rules.py`.
+
+| Rule | Fires when | Points | Threshold variable |
+|---|---|---|---|
+| `large_amount` | amount ≥ 10,000 | 40 | `FRAUD_LARGE_AMOUNT` |
+| `elevated_amount` | amount ≥ 5,000 (and below the large amount) | 20 | `FRAUD_ELEVATED_AMOUNT` |
+| `velocity_high` | sender completed ≥ 10 transfers in the last 60 s | 60 | `FRAUD_VELOCITY_HIGH` |
+| `velocity_elevated` | sender completed ≥ 5 transfers in the last 60 s | 30 | `FRAUD_VELOCITY_ELEVATED` |
+| `daily_volume` | sent in the last 24 h + this amount ≥ 20,000 | 30 | `FRAUD_DAILY_LIMIT` |
+| `balance_drain` | amount ≥ 500 and ≥ 90% of the sender's balance | 25 | `FRAUD_DRAIN_RATIO`, `FRAUD_DRAIN_MIN_AMOUNT` |
+| `new_account` | account younger than 1 hour and amount ≥ 500 | 30 | `FRAUD_NEW_ACCOUNT_SECONDS`, `FRAUD_NEW_ACCOUNT_MIN_AMOUNT` |
+| `first_time_receiver` | first payment to this receiver and amount ≥ 1,000 | 15 | `FRAUD_FIRST_RECEIVER_MIN_AMOUNT` |
+
+The points add up (capped at 100). Score ≥ 70 is **high**: the transfer is declined with HTTP 403. Score ≥ 40 is **medium**: the transfer goes through and is flagged. Below 40 is **low**. If `fraud-service` cannot be reached, the transfer is aborted with HTTP 503 and the idempotency key is released so it can be retried.
+
+### Kafka: Transactional Outbox and Fraud Consumer
+
+Kafka is optional and is switched on by `KAFKA_BOOTSTRAP_SERVERS` (staging and local compose; not prod yet).
+
+* **Outbox:** `transaction-service` inserts a row into the `outbox` table in the same database transaction as the balance updates. A background thread publishes unpublished rows to `transactions.events` (`FOR UPDATE SKIP LOCKED`, so replicas do not collide) and sets `published_at`. Delivery is at-least-once.
+* **Consumer:** `fraud-service` reads `transactions.events` in consumer group `fraud-service`, commits offsets only after handling a message, and skips events whose `event_id` it has already seen (bounded in-memory cache per pod). A completed transfer that was flagged `medium` is published to `fraud.alerts`. A message that is not valid JSON or has no `event_id` goes to `transactions.events.dlq`.
+* The synchronous HTTP fraud check stays in place; Kafka adds the after-the-fact alert stream.
+
+### Structured Logs and Correlation IDs
+
+Every Python service writes one JSON object per line: `timestamp`, `level`, `service`, `correlation_id`, `user_id` (when known), `method`, `path`, `status`, `duration_ms`, `message`, and `trace_id` when tracing is on. `api-gateway` creates `X-Correlation-ID` if the caller did not send one, and every service repeats it on its own calls, so one ID follows a request through all services. uvicorn's own access log is off (`--no-access-log`), health and metrics requests are not logged, and headers, tokens and passwords are never written. The code is `nexora_common.py`, kept identical in every service folder by `scripts/sync-common.sh` (CI checks it).
+
+### Multiple workers (opt-in)
+
+By default each container runs one uvicorn worker and behaves as before. To run more:
+
+```yaml
+env:
+  - name: WEB_CONCURRENCY          # uvicorn worker count
+    value: "4"
+  - name: PROMETHEUS_MULTIPROC_DIR # must be an empty, writable directory at start (emptyDir)
+    value: /tmp/prometheus-multiproc
+```
+
+With `PROMETHEUS_MULTIPROC_DIR` set, `prometheus_client` stores samples in files and `/metrics` aggregates all workers through `MultiProcessCollector`, so the workers no longer collide. This path is implemented but **not yet deployed or benchmarked**. Two caveats: the in-memory rate limiter in `api-gateway` and the event de-duplication cache in `fraud-service` are per process, and OpenTelemetry auto-instrumentation has not been tested with several workers.
+
 ---
 
 ## Secure Software Supply Chain (CI)
 
-This repository enforces a strict DevSecOps pipeline (`.github/workflows/ci.yml`). Code is never manually built or deployed.
+This repository enforces a strict DevSecOps pipeline (`.github/workflows/ci.yaml`). Code is never manually built or deployed.
 
 ```mermaid
 graph LR
@@ -221,6 +292,8 @@ graph LR
 ### Pipeline Responsibilities
 * **Vulnerability Gating:** Fails the build immediately if `CRITICAL` OS or library vulnerabilities are detected.
 * **Keyless Cryptographic Signing:** Signs container images using GitHub Actions OIDC federation via Cosign.
+* **Pinned scanner:** `aquasecurity/trivy-action` is pinned to the commit of release v0.36.0 instead of a moving branch.
+* **Pull-request checks** (`.github/workflows/checks.yaml`): byte-compile, shared-module sync check, import and health smoke test of every service, unit tests, and `docker compose config`. Dependabot opens weekly update PRs.
 * **Automated GitOps Promotion:** Uses a scoped token to open a Pull Request in `app-manifests`, pinning workloads to immutable Git SHA image digests.
 
 ![CI pipeline run](screenshots/github-ci.png)
@@ -268,7 +341,7 @@ Two changes were attempted to address single-worker serialization in `transactio
 
 Because the worker-count change was never actually live, the isolated-workload benchmark above reflects the thread-offload fix alone, running with `UVICORN_WORKERS=1`. Re-benchmarking after the worker-concurrency issue is resolved is the next step before any capacity-planning numbers can be trusted.
 
-**Known fix for the reverted change:** run `prometheus-fastapi-instrumentator` in multiprocess mode — set `PROMETHEUS_MULTIPROC_DIR` and use `prometheus_client.multiprocess.MultiProcessCollector` so each worker writes to a shared file-backed registry instead of colliding in memory. Not yet implemented; tracked as an open item.
+**Fix for the reverted change:** Prometheus multiprocess mode is now implemented behind `PROMETHEUS_MULTIPROC_DIR` (see [Multiple workers](#multiple-workers-opt-in)). It is off by default and has not been deployed, so the benchmarks have not been re-run with more than one worker.
 
 **Production capacity planning is deferred** until a real per-request compute cost is measured via live CPU sampling during a load run (not a post-test snapshot). No sizing numbers are published here yet, to avoid stating a conclusion the current data doesn't support.
 
@@ -278,11 +351,16 @@ Because the worker-count change was never actually live, the isolated-workload b
 kubectl get pods -n nexora -o wide
 kubectl get deploy -n nexora -o jsonpath='{range .items[*]}{.metadata.name}{"  replicas: "}{.spec.replicas}{"\n"}{end}'
 
-# Hotspot profile (single account pair, 10 concurrent):
-python3 tests/load_benchmark.py
-
-# Isolated profile (100 independent pairs, zero row overlap):
+# Isolated profile (100 independent pairs, 1 transfer each, zero row overlap).
+# This script produced the "Isolated Workload" numbers above.
 python3 tests/load_benchmark_isolated.py
+
+# Distributed profile (4 independent pairs x 25 transfers = 100 requests).
+python3 tests/load_benchmark_distributed.py
+
+# The script that produced the "Single-Account Hotspot" numbers (one account pair,
+# 10 concurrent workers) is not in this repository. The distributed script with
+# PAIRS_COUNT = 1 is the closest equivalent.
 
 # To correlate with compute usage, watch this live in a second terminal
 # WHILE the benchmark runs (a post-test snapshot is not sufficient):
@@ -310,11 +388,11 @@ This section documents actual technical bugs encountered during the application 
 ### 3. Prometheus Multiprocess Collision in Uvicorn
 * **Symptom:** `api-gateway` pods entered `CrashLoopBackOff` when scaled to 4 workers.
 * **Diagnosis:** `prometheus-fastapi-instrumentator` stores its metric registry in single-process memory. Running `uvicorn --workers 4` caused child processes to collide when attempting to bind the same `/metrics` registry.
-* **Fix (interim):** Reverted to `--workers 1` per container, offloaded database I/O to background threads (`asyncio.to_thread`), and relied on Kubernetes replica count (`replicas: 2`) for horizontal scaling instead. A proper multiprocess-mode fix (`PROMETHEUS_MULTIPROC_DIR`) is scoped but not yet implemented — see [Performance Benchmarking](#performance-benchmarking--capacity-planning).
+* **Fix (interim):** Reverted to `--workers 1` per container, offloaded database I/O to background threads (`asyncio.to_thread`), and relied on Kubernetes replica count (`replicas: 2`) for horizontal scaling instead. Multiprocess mode (`PROMETHEUS_MULTIPROC_DIR`) is now available as an opt-in — see [Multiple workers](#multiple-workers-opt-in). It is off by default and not yet benchmarked.
 
 ### 4. Ambiguous Network Timeout vs. Destructive Compensation Hazard
 * **Symptom:** Onboarding grants that timed out over the network triggered local user deletion in `auth-service`, causing foreign-key crashes and unallocated treasury debits.
 * **Diagnosis:** Network timeouts are ambiguous states; deleting local state on timeout violates distributed-systems safety.
-* **Fix:** Switched onboarding keys to deterministic values (`grant-user-{id}`) instead of random UUIDs and eliminated local deletes, making grant RPCs safely retryable via the idempotency engine.
+* **Fix:** Switched onboarding keys to deterministic values (`grant-user-{id}`) instead of random UUIDs. A timeout or a 409 ("grant in flight") now keeps the user and reports the grant as pending; a background task in `auth-service` re-sends pending grants every 60 seconds (safe on several replicas because the key is deterministic). The user is deleted only when `transaction-service` gives a definite refusal, such as a depleted treasury.
 
 ---
