@@ -2,7 +2,7 @@ apiVersion: backstage.io/v1alpha1
 kind: System
 metadata:
   name: nexora-core-banking
-  description: The core banking transaction and ledger system
+  description: Core banking platform (accounts, transfers, fraud checks)
 spec:
   owner: platform-team
 ---
@@ -10,7 +10,7 @@ apiVersion: backstage.io/v1alpha1
 kind: Component
 metadata:
   name: api-gateway
-  description: Edge router and JWT authentication verification
+  description: Edge router, JWT verification, rate limiting, correlation IDs
   tags:
     - python
     - fastapi
@@ -28,7 +28,7 @@ apiVersion: backstage.io/v1alpha1
 kind: Component
 metadata:
   name: auth-service
-  description: User authentication, hashing, and token authority
+  description: Signup, login, JWT issuing, welcome-grant retry
   tags:
     - python
     - bcrypt
@@ -44,7 +44,7 @@ apiVersion: backstage.io/v1alpha1
 kind: Component
 metadata:
   name: account-service
-  description: Strictly read-only CQRS ledger balance inquiries
+  description: Read-only balance and transaction history
   tags:
     - python
     - mysql
@@ -58,7 +58,7 @@ apiVersion: backstage.io/v1alpha1
 kind: Component
 metadata:
   name: transaction-service
-  description: ACID execution engine with deterministic locking
+  description: Sole writer of the ledger - idempotent transfers, row locking, transactional outbox
   tags:
     - python
     - mysql
@@ -69,12 +69,14 @@ spec:
   system: nexora-core-banking
   dependsOn:
     - component:fraud-service
+    - resource:nexora-mysql
+    - resource:nexora-kafka
 ---
 apiVersion: backstage.io/v1alpha1
 kind: Component
 metadata:
   name: fraud-service
-  description: Compute-heavy mathematical risk assessment engine
+  description: Stateless rule-based fraud scoring and Kafka event consumer
   tags:
     - python
     - hpa
@@ -82,4 +84,42 @@ spec:
   type: service
   lifecycle: production
   owner: risk-team
-  system: nexora-core-banking   
+  system: nexora-core-banking
+  dependsOn:
+    - resource:nexora-kafka
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: frontend-web
+  description: Single-page web UI served by NGINX
+  tags:
+    - nginx
+    - javascript
+spec:
+  type: website
+  lifecycle: production
+  owner: edge-team
+  system: nexora-core-banking
+  dependsOn:
+    - component:api-gateway
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: nexora-mysql
+  description: Amazon RDS MySQL 8.0 - users, accounts, transactions, idempotency records, outbox
+spec:
+  type: database
+  owner: ledger-team
+  system: nexora-core-banking
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: nexora-kafka
+  description: Strimzi Kafka cluster (staging) - transactions.events, fraud.alerts, DLQ
+spec:
+  type: message-broker
+  owner: platform-team
+  system: nexora-core-banking

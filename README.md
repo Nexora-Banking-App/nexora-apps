@@ -103,8 +103,8 @@ docker compose up --build
 Open your browser to: `http://localhost:8080`.
 Sign up a new user, log in, and observe the pre-seeded $1,000.00 Treasury Grant in your ledger.
 
-![!\[Local Dashboard Screen\](screenshots/local-dashboard.png)
-](screenshots/docker-compose-up.png)![Signup Screen](screenshots/signup-screen.png)
+![Local stack running](screenshots/docker-compose-up.png)
+![Signup screen](screenshots/signup-screen.png)
 
 **3. Run the Concurrency Test Suite** (needs the stack from step 1)
 ```bash
@@ -188,6 +188,8 @@ graph TD
 ## Financial Concurrency Engine
 
 Handling money in distributed systems requires strict invariant enforcement. The `transaction-service` implements a defensive concurrency engine to prevent deadlocks, pool exhaustion, and double-spending.
+
+Input is validated at the edge of each service (username, email, password length, amount precision, idempotency-key length), and error responses never include database or upstream error text; those details go to the logs only.
 
 ### The Two-Phase Lease & Fencing Token Workflow
 
@@ -293,7 +295,8 @@ graph LR
 * **Vulnerability Gating:** Fails the build immediately if `CRITICAL` OS or library vulnerabilities are detected.
 * **Keyless Cryptographic Signing:** Signs container images using GitHub Actions OIDC federation via Cosign.
 * **Pinned scanner:** `aquasecurity/trivy-action` is pinned to the commit of release v0.36.0 instead of a moving branch.
-* **Pull-request checks** (`.github/workflows/checks.yaml`): byte-compile, shared-module sync check, import and health smoke test of every service, unit tests, and `docker compose config`. Dependabot opens weekly update PRs.
+* **Scan before credentials:** the image is built and scanned before the pipeline logs in to AWS, so a vulnerable image never reaches ECR and a scan failure does not depend on the cloud account. Images are signed by digest, not by tag.
+* **Pull-request checks** (`.github/workflows/checks.yaml`): per service, install its own dependencies, byte-compile, import and health smoke test, and unit tests; build every image and run the same Trivy gate; check the shared module is in sync and `docker-compose.yml` is valid. Dependabot opens one grouped update PR per ecosystem each week.
 * **Automated GitOps Promotion:** Uses a scoped token to open a Pull Request in `app-manifests`, pinning workloads to immutable Git SHA image digests.
 
 ![CI pipeline run](screenshots/github-ci.png)
@@ -366,8 +369,8 @@ python3 tests/load_benchmark_distributed.py
 # WHILE the benchmark runs (a post-test snapshot is not sufficient):
 watch -n1 kubectl top pods -n nexora
 ```
-![!\[Isolated load benchmark output\](screenshots/isolated-benchmark-output.png)
-](screenshots/isolated-test.png)![Hotspot load benchmark output](screenshots/concurrent-test.png)
+![Isolated load benchmark output](screenshots/isolated-test.png)
+![Hotspot load benchmark output](screenshots/concurrent-test.png)
 
 ---
 
