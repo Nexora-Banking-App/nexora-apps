@@ -1,10 +1,15 @@
-# Weekly dependency update PRs. The PR checks workflow runs on each of them.
+# Weekly dependency updates, grouped so each ecosystem produces ONE pull request
+# instead of one per package per service. The PR checks workflow runs on each.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 2
+    groups:
+      github-actions:
+        patterns: ["*"]
 
   - package-ecosystem: pip
     directories:
@@ -15,11 +20,11 @@ updates:
       - /fraud-service
     schedule:
       interval: weekly
+    open-pull-requests-limit: 2
     groups:
-      # One PR for the OpenTelemetry packages: their versions must move together
-      opentelemetry:
-        patterns:
-          - "opentelemetry-*"
+      # The same package is pinned in several services; they must move together.
+      python-dependencies:
+        patterns: ["*"]
 
   - package-ecosystem: docker
     directories:
@@ -31,3 +36,12 @@ updates:
       - /frontend-web
     schedule:
       interval: weekly
+    open-pull-requests-limit: 2
+    groups:
+      base-images:
+        patterns: ["*"]
+    ignore:
+      # Stay on Python 3.11.x: a new minor version is a deliberate migration,
+      # not an automatic bump.
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]

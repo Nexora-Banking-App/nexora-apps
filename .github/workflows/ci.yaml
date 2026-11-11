@@ -9,18 +9,26 @@ on:
       - '**/Dockerfile'
       - '**/requirements.txt'
       - 'frontend-web/**'
-      - '.github/workflows/**'
+      - '.github/workflows/ci.yaml'
   workflow_dispatch:
 
+# Least privilege: every job asks only for what it needs.
 permissions:
-  id-token: write     # Required for AWS OIDC and Cosign
-  contents: write     # Required to checkout code and modify manifests
-  pull-requests: write # Required for the GitOps PR bot
+  contents: read
+
+# One release pipeline at a time, so two pushes cannot race each other to ECR
+# or open two promotion PRs out of order.
+concurrency:
+  group: ci-main
+  cancel-in-progress: false
 
 jobs:
   build-scan-push:
     name: "Build, Scan, & Push"
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # AWS OIDC login and keyless Cosign signing
     strategy:
       fail-fast: false
       matrix:
@@ -43,30 +51,14 @@ jobs:
         id: vars
         run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Configure AWS Credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-
-      - name: Log in to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Ensure ECR Repository Exists
-        run: |
-          aws ecr describe-repositories --repository-names "nexora/${{ matrix.service }}" --region us-east-1 || \
-          aws ecr create-repository --repository-name "nexora/${{ matrix.service }}" --region us-east-1 --image-scanning-configuration scanOnPush=true
-
+      # Build and scan BEFORE touching AWS: a vulnerable image never gets
+      # credentials, and scan failures do not depend on the cloud account.
       - name: Build Docker Image
         env:
-          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          REPOSITORY: nexora/${{ matrix.service }}
-          IMAGE_TAG: ${{ steps.vars.outputs.sha_short }}
+          LOCAL_IMAGE: nexora/${{ matrix.service }}:${{ steps.vars.outputs.sha_short }}
         run: |
-          docker build -t $REGISTRY/$REPOSITORY:$IMAGE_TAG ./${{ matrix.service }}
-          # Save image name to file for Trivy to scan locally before pushing
-          docker save $REGISTRY/$REPOSITORY:$IMAGE_TAG -o image.tar
+          docker build -t "$LOCAL_IMAGE" ./${{ matrix.service }}
+          docker save "$LOCAL_IMAGE" -o image.tar
 
       - name: Run Trivy CVE Vulnerability Scanner
         # Pinned to the commit of release v0.36.0. A moving ref (master) lets any
@@ -80,32 +72,49 @@ jobs:
           vuln-type: 'os,library'
           severity: 'CRITICAL'
 
-      - name: Push Docker Image to ECR
-        env:
-          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          REPOSITORY: nexora/${{ matrix.service }}
-          IMAGE_TAG: ${{ steps.vars.outputs.sha_short }}
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure ECR Repository Exists
         run: |
-          docker push $REGISTRY/$REPOSITORY:$IMAGE_TAG
+          aws ecr describe-repositories --repository-names "nexora/${{ matrix.service }}" --region us-east-1 || \
+          aws ecr create-repository --repository-name "nexora/${{ matrix.service }}" --region us-east-1 \
+            --image-scanning-configuration scanOnPush=true --image-tag-mutability IMMUTABLE
+
+      - name: Push Docker Image to ECR
+        id: push
+        env:
+          LOCAL_IMAGE: nexora/${{ matrix.service }}:${{ steps.vars.outputs.sha_short }}
+          REMOTE_IMAGE: ${{ steps.login-ecr.outputs.registry }}/nexora/${{ matrix.service }}:${{ steps.vars.outputs.sha_short }}
+        run: |
+          docker tag "$LOCAL_IMAGE" "$REMOTE_IMAGE"
+          docker push "$REMOTE_IMAGE"
+          # The digest identifies exactly the bytes that were pushed
+          echo "digest_ref=$(docker inspect --format='{{index .RepoDigests 0}}' "$REMOTE_IMAGE")" >> $GITHUB_OUTPUT
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3.5.0
-        
+
       - name: Sign the ECR Image
-        env:
-          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          REPOSITORY: nexora/${{ matrix.service }}
-          IMAGE_TAG: ${{ steps.vars.outputs.sha_short }}
-        run: |
-          cosign sign --yes $REGISTRY/$REPOSITORY:$IMAGE_TAG
+        # Signed by digest, not by tag: a tag can be moved, a digest cannot.
+        run: cosign sign --yes "${{ steps.push.outputs.digest_ref }}"
 
   # =========================================================================
-  # 6. GitOps Promotion (The PR Bot)
+  # GitOps Promotion (The PR Bot)
   # =========================================================================
   promote-to-staging:
     name: "Automated GitOps Promotion"
     needs: build-scan-push
     runs-on: ubuntu-latest
+    permissions:
+      contents: read # the PR in app-manifests is opened with GITOPS_PAT, not GITHUB_TOKEN
     steps:
       - name: Checkout app-manifests repository
         uses: actions/checkout@v4
@@ -114,7 +123,7 @@ jobs:
           token: ${{ secrets.GITOPS_PAT }}
           path: app-manifests
 
-      - name: Update Kustomize Image Digests
+      - name: Update Kustomize Image Tags
         working-directory: app-manifests/overlays/staging
         env:
           IMAGE_TAG: ${{ needs.build-scan-push.outputs.image_tag }}
@@ -133,10 +142,11 @@ jobs:
           title: "🚀 Deploy: Promote staging workloads to ${{ needs.build-scan-push.outputs.image_tag }}"
           body: |
             ## Automated GitOps Promotion
-            This PR updates the staging Kustomize manifests to use the newly scanned and signed image digests.
-            
+            This PR updates the staging Kustomize manifests to the newly scanned and signed image tag.
+
             **Commit SHA:** `${{ needs.build-scan-push.outputs.image_tag }}`
-            
+
             Merging this PR will trigger ArgoCD to automatically synchronize the cluster.
           branch: "promote/staging-${{ needs.build-scan-push.outputs.image_tag }}"
           base: main
+          delete-branch: true
