@@ -1,3 +1,7 @@
+from nexora_common import configure_logging, install_request_logging, prepare_multiprocess_metrics
+
+prepare_multiprocess_metrics()  # must run before prometheus_client is imported
+
 import os
 import uuid
 import time
@@ -10,6 +14,8 @@ from fastapi import FastAPI, Request, Response, HTTPException, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
+
+logger = configure_logging("api-gateway")
 
 # --- Configuration ---
 JWT_SECRET = os.getenv("JWT_SECRET", "nexora-super-secret-key-change-in-prod")
@@ -64,7 +70,9 @@ async def gateway_middleware(request: Request, call_next):
     if request.method == "OPTIONS":
         return await call_next(request)
 
-    correlation_id = request.headers.get("X-Correlation-ID", str(uuid.uuid4()))
+    # Set by the request-logging middleware (it runs first): the caller's
+    # X-Correlation-ID, or a new one. Every proxied call forwards it.
+    correlation_id = getattr(request.state, "correlation_id", None) or request.headers.get("X-Correlation-ID") or str(uuid.uuid4())
     request.state.correlation_id = correlation_id
     client_ip = request.client.host if request.client else "unknown"
 
@@ -103,6 +111,10 @@ async def gateway_middleware(request: Request, call_next):
 
     return response
 
+# Registered last so it wraps everything above: it creates the correlation ID
+# and writes one JSON access line per request (status as the client sees it).
+install_request_logging(app, logger)
+
 # --- Reverse Proxy Logic ---
 async def proxy_request(target_url: str, request: Request) -> Response:
     headers = {
@@ -131,8 +143,10 @@ async def proxy_request(target_url: str, request: Request) -> Response:
         )
         return Response(content=res.content, status_code=res.status_code, media_type="application/json")
     except httpx.TimeoutException:
+        logger.error("Upstream timeout calling %s", target_url)
         raise HTTPException(status_code=504, detail="Upstream gateway timeout")
     except Exception as e:
+        logger.error("Upstream call to %s failed: %s", target_url, type(e).__name__)
         raise HTTPException(status_code=502, detail=f"Upstream service unavailable: {str(e)}")
 
 # --- Health Probes for Kubernetes Lifecycle ---

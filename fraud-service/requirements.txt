@@ -1,3 +1,9 @@
 fastapi>=0.115.0,<1.0.0
 uvicorn==0.30.1
 prometheus-fastapi-instrumentator>=7.0.0,<8.0.0
+# Tracing (auto-instrumentation via opentelemetry-instrument)
+opentelemetry-distro==0.66b2
+opentelemetry-exporter-otlp-proto-http==1.45.2
+opentelemetry-instrumentation-fastapi==0.66b2
+# Kafka client (outbox publisher / event consumer)
+confluent-kafka==2.16.1
