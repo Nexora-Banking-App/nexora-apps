@@ -1,0 +1,33 @@
+# Weekly dependency update PRs. The PR checks workflow runs on each of them.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: pip
+    directories:
+      - /api-gateway
+      - /auth-service
+      - /account-service
+      - /transaction-service
+      - /fraud-service
+    schedule:
+      interval: weekly
+    groups:
+      # One PR for the OpenTelemetry packages: their versions must move together
+      opentelemetry:
+        patterns:
+          - "opentelemetry-*"
+
+  - package-ecosystem: docker
+    directories:
+      - /api-gateway
+      - /auth-service
+      - /account-service
+      - /transaction-service
+      - /fraud-service
+      - /frontend-web
+    schedule:
+      interval: weekly

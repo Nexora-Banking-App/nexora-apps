@@ -69,7 +69,9 @@ jobs:
           docker save $REGISTRY/$REPOSITORY:$IMAGE_TAG -o image.tar
 
       - name: Run Trivy CVE Vulnerability Scanner
-        uses: aquasecurity/trivy-action@master
+        # Pinned to the commit of release v0.36.0. A moving ref (master) lets any
+        # future upstream change run inside this pipeline with AWS credentials.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           input: image.tar
           format: 'table'
