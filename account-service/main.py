@@ -1,11 +1,18 @@
+from nexora_common import configure_logging, install_request_logging, prepare_multiprocess_metrics
+
+prepare_multiprocess_metrics()  # must run before prometheus_client is imported
+
 from fastapi import FastAPI, HTTPException, Header, Query
 from prometheus_fastapi_instrumentator import Instrumentator
 from dbutils.pooled_db import PooledDB
 import pymysql
 import os
 
+logger = configure_logging("account-service")
+
 app = FastAPI()
 Instrumentator().instrument(app).expose(app)
+install_request_logging(app, logger)
 
 db_pool = PooledDB(
     creator=pymysql,
