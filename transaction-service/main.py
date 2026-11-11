@@ -4,12 +4,13 @@ from nexora_common import (
     install_request_logging,
     outbound_headers,
     prepare_multiprocess_metrics,
+    warn_if_default_secret,
 )
 
 prepare_multiprocess_metrics()  # must run before prometheus_client is imported
 
 from fastapi import FastAPI, HTTPException, Header, status
-from pydantic import BaseModel, condecimal
+from pydantic import BaseModel, Field, condecimal
 from prometheus_client import Counter
 from prometheus_fastapi_instrumentator import Instrumentator
 from dbutils.pooled_db import PooledDB
@@ -29,7 +30,9 @@ import uuid
 logger = configure_logging("transaction-service")
 
 FRAUD_SVC_URL = os.getenv("FRAUD_SVC_URL", "http://fraud-service:8000")
-INTERNAL_SERVICE_SECRET = os.getenv("INTERNAL_SERVICE_SECRET", "nexora-internal-secret-key-123")
+_DEV_INTERNAL_SECRET = "nexora-internal-secret-key-123"
+INTERNAL_SERVICE_SECRET = os.getenv("INTERNAL_SERVICE_SECRET", _DEV_INTERNAL_SECRET)
+warn_if_default_secret(logger, "INTERNAL_SERVICE_SECRET", INTERNAL_SERVICE_SECRET, _DEV_INTERNAL_SECRET)
 
 # A PROCESSING lease older than this is considered abandoned (its worker crashed)
 # and may be taken over by a retry of the same idempotency key.
@@ -260,15 +263,18 @@ app = FastAPI(lifespan=lifespan)
 Instrumentator().instrument(app).expose(app)
 install_request_logging(app, logger)
 
+# The idempotency_key column is VARCHAR(64); longer keys are rejected up front.
+IDEMPOTENCY_KEY_MAX_LENGTH = 64
+
 class TransferPayload(BaseModel):
-    receiver_username: str
+    receiver_username: str = Field(min_length=1, max_length=50)
     amount: condecimal(gt=Decimal('0.00'), max_digits=15, decimal_places=2)
 
 class SystemTransferPayload(BaseModel):
     sender_id: int
     receiver_id: int
     amount: condecimal(gt=Decimal('0.00'), max_digits=15, decimal_places=2)
-    idempotency_key: str
+    idempotency_key: str = Field(min_length=1, max_length=IDEMPOTENCY_KEY_MAX_LENGTH)
 
 @app.get("/health/liveness")
 def liveness(): return {"status": "alive"}
@@ -434,10 +440,11 @@ def _sync_system_transfer(sender_id: int, receiver_id: int, amount: Decimal, key
             return success_payload
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         conn.rollback()
+        # The database error goes to the log, not to the caller.
         logger.exception("System transfer failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="System transfer failed")
     finally:
         conn.close()
 
@@ -605,10 +612,11 @@ def _sync_db_phase(
             return success_payload
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         conn.rollback()
+        # The database error goes to the log, not to the client.
         logger.exception("Transfer failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Transfer could not be completed. Please try again.")
     finally:
         conn.close()
 
@@ -625,7 +633,7 @@ async def _request_fraud_decision(facts: dict) -> httpx.Response:
 async def execute_transfer(
     payload: TransferPayload,
     x_user_id: int = Header(..., alias="X-User-Id"),
-    idempotency_key: str = Header(..., alias="Idempotency-Key"),
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=IDEMPOTENCY_KEY_MAX_LENGTH),
     x_correlation_id: Optional[str] = Header(None, alias="X-Correlation-ID")
 ):
     sender_id = x_user_id

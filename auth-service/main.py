@@ -3,6 +3,7 @@ from nexora_common import (
     install_request_logging,
     outbound_headers,
     prepare_multiprocess_metrics,
+    warn_if_default_secret,
 )
 
 prepare_multiprocess_metrics()  # must run before prometheus_client is imported
@@ -19,7 +20,7 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field
 from prometheus_client import Counter
 from prometheus_fastapi_instrumentator import Instrumentator
 from dbutils.pooled_db import PooledDB
@@ -27,10 +28,14 @@ from dbutils.pooled_db import PooledDB
 logger = configure_logging("auth-service")
 
 # --- Configuration ---
-JWT_SECRET = os.getenv("JWT_SECRET", "nexora-super-secret-key-change-in-prod")
+_DEV_JWT_SECRET = "nexora-super-secret-key-change-in-prod"
+_DEV_INTERNAL_SECRET = "nexora-internal-secret-key-123"
+JWT_SECRET = os.getenv("JWT_SECRET", _DEV_JWT_SECRET)
 JWT_ALGORITHM = "HS256"
 TRANSACTION_SVC_URL = os.getenv("TRANSACTION_SVC_URL", "http://transaction-service:8000")
-INTERNAL_SERVICE_SECRET = os.getenv("INTERNAL_SERVICE_SECRET", "nexora-internal-secret-key-123")
+INTERNAL_SERVICE_SECRET = os.getenv("INTERNAL_SERVICE_SECRET", _DEV_INTERNAL_SECRET)
+warn_if_default_secret(logger, "JWT_SECRET", JWT_SECRET, _DEV_JWT_SECRET)
+warn_if_default_secret(logger, "INTERNAL_SERVICE_SECRET", INTERNAL_SERVICE_SECRET, _DEV_INTERNAL_SECRET)
 
 # Welcome-grant retry: a background task re-sends grants that never settled
 # (for example when transaction-service was unreachable during signup).
@@ -160,15 +165,18 @@ Instrumentator().instrument(app).expose(app)
 install_request_logging(app, logger)
 
 # --- Models ---
+# Limits match the column sizes in db-init (username 50, email 100, phone 20),
+# so oversized input is rejected with a clear 422 instead of a database error.
 class UserSignup(BaseModel):
-    username: str
-    email: str
-    phone: str
-    password: str
+    username: str = Field(min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_.-]+$")
+    email: EmailStr = Field(max_length=100)
+    phone: str = Field(min_length=3, max_length=20)
+    # bcrypt only reads the first 72 bytes of a password
+    password: str = Field(min_length=8, max_length=72)
 
 class UserLogin(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=50)
+    password: str = Field(min_length=1, max_length=72)
 
 # --- Helpers ---
 def create_access_token(user_id: int, username: str) -> str:
@@ -233,10 +241,11 @@ async def signup(user: UserSignup):
     except pymysql.err.IntegrityError:
         conn.rollback()
         raise HTTPException(status_code=400, detail="Username or Email already registered")
-    except Exception as e:
+    except Exception:
         conn.rollback()
+        # The database error goes to the log, not to the client.
         logger.exception("Signup failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Signup failed. Please try again.")
     finally:
         conn.close()
 
