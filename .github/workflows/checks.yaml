@@ -1,7 +1,7 @@
 name: "PR checks"
 
-# Fast quality gates on every pull request. Nothing here needs AWS access;
-# images are only built and pushed by ci.yaml after a merge to main.
+# Quality gates on every pull request. Nothing here needs AWS access;
+# images are only pushed by ci.yaml after a merge to main.
 on:
   pull_request:
   workflow_dispatch:
@@ -14,9 +14,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  python:
-    name: "Python: compile, shared-module sync, unit tests"
+  repo:
+    name: "Repo: shared module in sync, compose file valid"
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shared module is identical in every service
+        run: scripts/sync-common.sh --check
+      - name: docker-compose.yml is valid
+        run: docker compose config -q
+
+  python:
+    # One job per service, each with its own dependencies, exactly like its image.
+    name: "Python (${{ matrix.service }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api-gateway, auth-service, account-service, transaction-service, fraud-service]
     steps:
       - uses: actions/checkout@v4
 
@@ -24,29 +39,18 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: "**/requirements.txt"
+          cache-dependency-path: ${{ matrix.service }}/requirements.txt
 
-      - name: Shared module is identical in every service
-        run: scripts/sync-common.sh --check
+      - name: Install dependencies
+        run: pip install -r ${{ matrix.service }}/requirements.txt pytest httpx
 
-      - name: Install service dependencies
+      - name: Byte-compile
+        run: python -m compileall -q ${{ matrix.service }}
+
+      - name: Service imports and answers its health check
+        working-directory: ${{ matrix.service }}
         run: |
-          pip install \
-            -r api-gateway/requirements.txt \
-            -r auth-service/requirements.txt \
-            -r account-service/requirements.txt \
-            -r transaction-service/requirements.txt \
-            -r fraud-service/requirements.txt \
-            pytest
-
-      - name: Byte-compile all Python
-        run: python -m compileall -q api-gateway auth-service account-service transaction-service fraud-service tests
-
-      - name: Every service imports and answers its health check
-        run: |
-          for svc in api-gateway auth-service account-service transaction-service fraud-service; do
-            echo "::group::$svc"
-            (cd "$svc" && python - <<'EOF'
+          python - <<'EOF'
           from fastapi.testclient import TestClient
           import main
           with TestClient(main.app) as client:
@@ -54,16 +58,34 @@ jobs:
               assert client.get("/metrics").status_code == 200
           print("ok")
           EOF
-            )
-            echo "::endgroup::"
-          done
 
       - name: Unit tests
+        if: matrix.service == 'fraud-service'
         run: pytest tests/unit -v
 
-  compose:
-    name: "docker-compose.yml is valid"
+  image:
+    # Build every image and scan it with the same gate the release pipeline uses,
+    # so a broken Dockerfile or a CRITICAL CVE is found on the PR, not after merge.
+    name: "Image build + Trivy (${{ matrix.service }})"
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [frontend-web, api-gateway, auth-service, account-service, transaction-service, fraud-service]
     steps:
       - uses: actions/checkout@v4
-      - run: docker compose config -q
+
+      - name: Build image
+        run: |
+          docker build -t "nexora/${{ matrix.service }}:pr" ./${{ matrix.service }}
+          docker save "nexora/${{ matrix.service }}:pr" -o image.tar
+
+      - name: Trivy scan (CRITICAL, fixable)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          input: image.tar
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL'
