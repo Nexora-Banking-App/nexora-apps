@@ -170,6 +170,18 @@ def install_request_logging(app, logger: logging.Logger) -> None:
             user_id_var.reset(uid_token)
 
 
+def warn_if_default_secret(logger: logging.Logger, name: str, value: str, development_default: str) -> None:
+    """Log a warning when a secret still has its built-in development value.
+
+    The defaults exist so `docker compose up` works with no setup. In Kubernetes
+    the real values come from AWS Secrets Manager; this line in the logs means
+    that wiring is broken and the service is running with a publicly known key.
+    The secret itself is never logged.
+    """
+    if value == development_default:
+        logger.warning("%s is using the built-in development default. Never run like this outside local development.", name)
+
+
 def prepare_multiprocess_metrics() -> Optional[str]:
     """Opt-in Prometheus multiprocess mode (needed for `uvicorn --workers N`).
 

@@ -1,8 +1,14 @@
-from nexora_common import configure_logging, install_request_logging, prepare_multiprocess_metrics
+from nexora_common import (
+    configure_logging,
+    install_request_logging,
+    prepare_multiprocess_metrics,
+    warn_if_default_secret,
+)
 
 prepare_multiprocess_metrics()  # must run before prometheus_client is imported
 
 import os
+import secrets
 import uuid
 import time
 import jwt
@@ -18,11 +24,15 @@ from prometheus_fastapi_instrumentator import Instrumentator
 logger = configure_logging("api-gateway")
 
 # --- Configuration ---
-JWT_SECRET = os.getenv("JWT_SECRET", "nexora-super-secret-key-change-in-prod")
+_DEV_JWT_SECRET = "nexora-super-secret-key-change-in-prod"
+_DEV_INTERNAL_SECRET = "nexora-internal-secret-key-123"
+JWT_SECRET = os.getenv("JWT_SECRET", _DEV_JWT_SECRET)
 AUTH_URL = os.getenv("AUTH_SVC_URL", "http://auth-service:8000")
 ACCOUNT_URL = os.getenv("ACCOUNT_SVC_URL", "http://account-service:8000")
 TRANSACTION_URL = os.getenv("TRANSACTION_SVC_URL", "http://transaction-service:8000")
-INTERNAL_SERVICE_SECRET = os.getenv("INTERNAL_SERVICE_SECRET", "nexora-internal-secret-key-123")
+INTERNAL_SERVICE_SECRET = os.getenv("INTERNAL_SERVICE_SECRET", _DEV_INTERNAL_SECRET)
+warn_if_default_secret(logger, "JWT_SECRET", JWT_SECRET, _DEV_JWT_SECRET)
+warn_if_default_secret(logger, "INTERNAL_SERVICE_SECRET", INTERNAL_SERVICE_SECRET, _DEV_INTERNAL_SECRET)
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080").split(",")
 
 # --- Rate Limiter ---
@@ -30,12 +40,23 @@ class RateLimiter:
     def __init__(self) -> None:
         self.requests = defaultdict(list)
 
+    # In-memory and per pod: with N gateway replicas a client gets up to N times
+    # the limit. A shared store (Redis) would be needed for an exact global limit.
+    MAX_TRACKED_KEYS = 10_000
+
     def is_allowed(self, key: str, max_requests: int, window_seconds: int) -> bool:
         now = time.time()
-        self.requests[key] = [t for t in self.requests[key] if t > now - window_seconds]
-        if len(self.requests[key]) >= max_requests:
+        recent = [t for t in self.requests[key] if t > now - window_seconds]
+        if len(recent) >= max_requests:
+            self.requests[key] = recent
             return False
-        self.requests[key].append(now)
+        recent.append(now)
+        self.requests[key] = recent
+        # Bound memory: an address sweep must not grow this dict forever.
+        if len(self.requests) > self.MAX_TRACKED_KEYS:
+            cutoff = now - 3600
+            for stale in [k for k, stamps in self.requests.items() if not stamps or stamps[-1] < cutoff]:
+                del self.requests[stale]
         return True
 
 rate_limiter = RateLimiter()
@@ -76,7 +97,10 @@ async def gateway_middleware(request: Request, call_next):
     request.state.correlation_id = correlation_id
     client_ip = request.client.host if request.client else "unknown"
 
-    is_internal_test = request.headers.get("X-Internal-Service-Key") == INTERNAL_SERVICE_SECRET
+    # Constant-time comparison: the key must not be guessable from response timing.
+    is_internal_test = secrets.compare_digest(
+        request.headers.get("X-Internal-Service-Key", ""), INTERNAL_SERVICE_SECRET
+    )
     path = request.url.path
 
     if not is_internal_test:
@@ -129,8 +153,8 @@ async def proxy_request(target_url: str, request: Request) -> Response:
     if "Idempotency-Key" in request.headers:
         headers["Idempotency-Key"] = request.headers["Idempotency-Key"]
 
-    if "X-Internal-Service-Key" in request.headers:
-        headers["X-Internal-Service-Key"] = request.headers["X-Internal-Service-Key"]
+    # X-Internal-Service-Key is deliberately NOT forwarded: no proxied route needs
+    # it, and a client-supplied value must never reach the internal services.
 
     body = await request.body()
     try:
@@ -146,8 +170,9 @@ async def proxy_request(target_url: str, request: Request) -> Response:
         logger.error("Upstream timeout calling %s", target_url)
         raise HTTPException(status_code=504, detail="Upstream gateway timeout")
     except Exception as e:
-        logger.error("Upstream call to %s failed: %s", target_url, type(e).__name__)
-        raise HTTPException(status_code=502, detail=f"Upstream service unavailable: {str(e)}")
+        # Details (internal hostnames, driver errors) go to the log, not to the client.
+        logger.error("Upstream call to %s failed: %s: %s", target_url, type(e).__name__, e)
+        raise HTTPException(status_code=502, detail="Upstream service unavailable")
 
 # --- Health Probes for Kubernetes Lifecycle ---
 
