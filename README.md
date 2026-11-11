@@ -30,6 +30,27 @@ This repository contains the core application workloads and the **Secure Softwar
 
 ---
 
+## At a Glance
+
+**What this repository is:** the source code of the six services, their tests, and the pipeline that turns a merge into scanned, signed images.
+
+| Path | Contents |
+|---|---|
+| `api-gateway/`, `auth-service/`, `account-service/`, `transaction-service/`, `fraud-service/` | One FastAPI service each: `main.py`, `requirements.txt`, `Dockerfile`, and the shared `nexora_common.py` (JSON logging, correlation IDs) |
+| `fraud-service/rules.py` | The fraud rules, free of any framework so they are easy to test |
+| `frontend-web/` | Single-page UI and its NGINX configuration |
+| `db-init/` | Schema and seed data for local development |
+| `tests/unit/` | Fraud rules, API contract and log-format tests; no running stack needed |
+| `tests/test_concurrency.py`, `tests/load_benchmark_*.py` | Concurrency suite and load generators; need a running stack |
+| `scripts/sync-common.sh` | Keeps `nexora_common.py` identical in every service |
+| `docker-compose.yml` | The whole system locally: MySQL, Kafka and the six services |
+| `catalog-info.yaml` | Backstage catalog entries |
+| `.github/` | `checks.yaml` (pull requests), `ci.yaml` (release), Dependabot |
+
+**What it does not contain:** Kubernetes manifests (`app-manifests`) or platform configuration (`platform-config`).
+
+---
+
 ## Table of Contents
 
 1. [Current Staging Deployment](#current-staging-deployment)
@@ -297,7 +318,7 @@ graph LR
 * **Pinned scanner:** `aquasecurity/trivy-action` is pinned to the commit of release v0.36.0 instead of a moving branch.
 * **Scan before credentials:** the image is built and scanned before the pipeline logs in to AWS, so a vulnerable image never reaches ECR and a scan failure does not depend on the cloud account. Images are signed by digest, not by tag.
 * **Pull-request checks** (`.github/workflows/checks.yaml`): per service, install its own dependencies, byte-compile, import and health smoke test, and unit tests; build every image and run the same Trivy gate; check the shared module is in sync and `docker-compose.yml` is valid. Dependabot opens one grouped update PR per ecosystem each week.
-* **Automated GitOps Promotion:** Uses a scoped token to open a Pull Request in `app-manifests`, pinning workloads to immutable Git SHA image digests.
+* **Automated GitOps Promotion:** Uses a scoped token to open a Pull Request in `app-manifests`, pinning workloads to immutable Git SHA image tags.
 
 ![CI pipeline run](screenshots/github-ci.png)
 ![GitOps promotion PR](screenshots/pr-upgrade.png)
