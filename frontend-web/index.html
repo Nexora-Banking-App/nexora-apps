@@ -75,6 +75,19 @@
         // Automatically routes to the Load Balancer /api path on any domain!
         const API_URL = window.location.origin === "http://localhost:8080" ? "http://localhost:8000/api" : "/api";
 
+        // The API returns `detail` as a string, or as a list of validation errors (HTTP 422).
+        function errorText(detail, fallback) {
+            if (Array.isArray(detail)) {
+                return detail.map(d => `${(d.loc || []).slice(-1)[0] || 'input'}: ${d.msg}`).join('; ');
+            }
+            return detail || fallback;
+        }
+
+        // Values from the API are inserted with innerHTML below, so escape them first.
+        function esc(value) {
+            return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        }
+
         function showScreen(id) {
             ['loginScreen', 'signupScreen', 'loadingScreen', 'dashboardScreen'].forEach(s => document.getElementById(s).classList.add('hidden'));
             document.getElementById(id).classList.remove('hidden');
@@ -100,7 +113,7 @@
                     setTimeout(() => showScreen('loginScreen'), 1500);
                 } else {
                     const err = await res.json();
-                    document.getElementById('signupError').innerText = err.detail || "Registration failed";
+                    document.getElementById('signupError').innerText = errorText(err.detail, "Registration failed");
                     document.getElementById('signupError').classList.remove('hidden');
                 }
             } catch (err) {
@@ -131,7 +144,7 @@
                     showScreen('dashboardScreen');
                     loadDashboard();
                 } else {
-                    document.getElementById('loginError').innerText = data.detail || "Invalid credentials";
+                    document.getElementById('loginError').innerText = errorText(data.detail, "Invalid credentials");
                     document.getElementById('loginError').classList.remove('hidden');
                 }
             } catch (err) {
@@ -172,13 +185,13 @@
                             const isReceiver = tx.receiver_name === (data.username || username);
                             const sign = isReceiver ? '+' : '-';
                             const color = isReceiver ? 'text-green-400' : 'text-red-400';
-                            const label = isReceiver ? `From ${tx.sender_name}` : `To ${tx.receiver_name}`;
+                            const label = isReceiver ? `From ${esc(tx.sender_name)}` : `To ${esc(tx.receiver_name)}`;
                             
                             return `
                             <tr class="border-b border-slate-600 hover:bg-slate-700 transition-colors">
                                 <td class="p-3 text-slate-300 font-medium">${label}</td>
                                 <td class="p-3 font-mono font-bold text-right ${color}">${sign}$${parseFloat(tx.amount).toFixed(2)}</td>
-                                <td class="p-3 text-xs text-slate-400 text-right">${tx.timestamp}</td>
+                                <td class="p-3 text-xs text-slate-400 text-right">${esc(tx.timestamp)}</td>
                             </tr>`;
                         }).join('');
                     } else {
@@ -227,7 +240,7 @@
                     loadDashboard();
                 } else {
                     msgBox.classList.add('text-red-400');
-                    msgBox.innerText = data.detail || "Transfer declined.";
+                    msgBox.innerText = errorText(data.detail, "Transfer declined.");
                 }
             } catch (err) {
                 msgBox.classList.add('text-red-400');
