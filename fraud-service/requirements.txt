@@ -1,6 +1,6 @@
-fastapi>=0.115.0,<1.0.0
-uvicorn==0.30.1
-prometheus-fastapi-instrumentator>=7.0.0,<8.0.0
+fastapi>=0.162.2,<1.0.0
+uvicorn==0.54.0
+prometheus-fastapi-instrumentator>=8.1.0,<9.0.0
 # Tracing (auto-instrumentation via opentelemetry-instrument)
 opentelemetry-distro==0.66b2
 opentelemetry-exporter-otlp-proto-http==1.45.2
